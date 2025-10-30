@@ -1,0 +1,607 @@
+# ==============================================================================
+# MEG Spike Detection - Configuration
+# ==============================================================================
+# This configuration supports:
+# - Traditional fixed-window dataset (PreloadedDataset)
+# - Online random-window dataset (OnlineWindowDataset) for temporal diversity
+# - Automatic split generation
+# - HDF5 preprocessing caching for fast loading
+# - DDP-safe distributed training
+#
+# Quick Start:
+#   Local Dev:  Set auto_generate_splits=true, use PreloadedDataset
+#   Production: Pre-run scripts/generate_splits.py and scripts/preprocess_recordings.py
+#               Then use OnlineWindowDataset with preprocessed_dir
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Experiment Configuration
+# ------------------------------------------------------------------------------
+experiment:
+  name: "${experiment_name}"     # Name of the experiment (from environment)
+  version: "${version}"          # Version identifier for this run
+  seed: 42                       # Global random seed for reproducibility
+  checkpoint_path: "${checkpoint_path}"          # Path to checkpoint for resuming (null = fresh start)
+
+# ------------------------------------------------------------------------------
+# Logging Configuration
+# ------------------------------------------------------------------------------
+logging:
+  log_dir: "${log_dir}"                    # Root directory for logs (from environment)
+  log_level: "INFO"                        # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  pipeline_log: "${log_dir}/pipeline.log" # Main pipeline log file
+  separator:
+    char: "="
+    length: 50
+
+# ------------------------------------------------------------------------------
+# Model Architecture Configuration
+# ------------------------------------------------------------------------------
+model:
+  name: "BIOT"  # Options: BIOT, BIOTHierarchical, SFCN, FAMED
+
+  # BIOTHierarchical: Two-stage transformer (window-level + sequence-level)
+  BIOTHierarchical:
+    emb_size: 256                     # Embedding dimension
+    heads: 4                          # Number of attention heads
+    window_encoder_depth: 4           # Number of transformer layers for window encoding
+    inter_window_depth: 4             # Number of transformer layers for sequence modeling
+    token_size: 20                    # Token size for time series tokenization
+    overlap: 0.5                      # Token overlap (0.0-1.0)
+    mode: "raw"                       # Input mode: "raw", "spec", "features"
+    linear_attention: false           # Use linear attention (faster but less expressive)
+    contextual: true                  # Enable contextual processing (BIOTHierarchical only)
+    sequential_processing: false      # Loop through windows vs parallel reshape
+
+    transformer:
+      attn_dropout: 0.2              # Attention dropout rate
+      ff_dropout: 0.2                # Feedforward dropout rate
+
+    token_selection:
+      use_cls_token: false           # Include CLS token for classification
+      use_mean_pool: 0               # Number of mean-pooled tokens
+      use_max_pool: false            # Include max-pooled token
+      use_min_pool: false            # Include min-pooled token
+      n_selected_tokens: 0           # Number of attention-selected tokens
+      selection_temperature: 1.0     # Temperature for token selection softmax
+
+    classifier:
+      num_heads: 8                   # Number of classification heads
+      dropout: 0.2                   # Classifier dropout rate
+
+    reference_coordinates: "${reference_channels}"  # Path to channel coordinate file
+
+  # BIOT: Single-stage transformer (simpler, faster)
+  BIOT:
+    emb_size: 256
+    heads: 4
+    depth: 4
+    token_size: 20
+    overlap: 0.5
+    mode: "raw"
+    sfreq: 200.0
+    linear_attention: false
+    contextual: false
+    sequential_processing: false
+    attn_dropout: 0.2
+    ff_dropout: 0.2
+    use_cls_token: true            # Include CLS token for classification
+    use_mean_pool: 0               # Number of mean-pooled tokens
+    use_max_pool: false            # Include max-pooled token
+    use_min_pool: false            # Include min-pooled token
+    n_selected_tokens: 0           # Number of attention-selected tokens
+    selection_temperature: 1.0     # Temperature for token selection softmax
+
+  # SFCN: Shallow Fully Convolutional Network (baseline)
+  SFCN:
+    conv_channels: [32, 64, 128, 256, 64]
+    conv_kernel_sizes: [5, 5, 5, 5, 1]
+    pool_kernel_size: 2
+    dropout: 0.5
+
+  # FAMED: Another baseline architecture
+  FAMED:
+    layers: [2, 2, 2, 2]
+    ch_num: 275
+    inplanes: 16
+    drop_connect_rate: 0.2
+
+# ------------------------------------------------------------------------------
+# Data Pipeline Configuration
+# ------------------------------------------------------------------------------
+data:
+  name: "MEGOnTheFlyDataModule"
+
+  MEGOnTheFlyDataModule:
+    # ==========================================================================
+    # Core Paths and Setup
+    # ==========================================================================
+    splits_dir: "${data_dir}/cv_splits"        # Where train/val/test splits are stored
+    fold: ${fold}                              # Current fold number (1-based)
+    n_folds: 5                                 # Number of K-fold cross-validation folds
+    prepare_data_per_node: false               # DDP: prepare data only on rank 0
+
+    # Root directories for raw MEG data files
+    root_dirs:
+      - "${root_dir}"
+      # - "/additional/data/path"              # Add more if needed
+
+    # Optional cache directory (legacy, use preprocessed_dir instead)
+    cache_dir: "${data_dir}/meg_preprocessing"
+
+    # Reference channel coordinates file (pickle format)
+    reference_coordinates: "${reference_channels}"
+
+    # ==========================================================================
+    # Split Generation (Automatic vs Manual)
+    # ==========================================================================
+    # Option 1 (Recommended for Slurm/Production):
+    #   - Set auto_generate_splits: false
+    #   - Pre-run: python scripts/generate_splits.py --config configs/config-splits.yaml
+    #   - Splits created once, reused across all runs
+    #
+    # Option 2 (Convenient for Local Dev):
+    #   - Set auto_generate_splits: true
+    #   - Splits generated automatically if missing
+    #   - Only happens on first run, then reused
+    # ==========================================================================
+    auto_generate_splits: true               # Auto-generate splits if missing
+
+    # ==========================================================================
+    # Dataset Selection: PreloadedDataset vs OnlineWindowDataset
+    # ==========================================================================
+    # PreloadedDataset (Original):
+    #   - Extracts ALL chunks at startup (fixed temporal positions)
+    #   - Stores all chunks in RAM
+    #   - Pros: Known behavior, deterministic
+    #   - Cons: Temporal overfitting, high RAM, slow startup
+    #   - Use for: Reproducing old results, quick experiments
+    #
+    # OnlineWindowDataset (NEW - Recommended):
+    #   - Loads preprocessed recordings (HDF5 files) into RAM
+    #   - Extracts random chunks on-the-fly each epoch
+    #   - Pros: Temporal diversity, lower RAM, fast startup, reduced overfitting
+    #   - Cons: Requires preprocessing step (one-time cost)
+    #   - Use for: Production training, best generalization
+    #
+    # Workflow for OnlineWindowDataset:
+    #   1. Pre-run: python scripts/preprocess_recordings.py \
+    #               --config configs/custom_config.yaml \
+    #               --splits-dir ${data_dir}/cv_splits \
+    #               --output-dir ${data_dir}/preprocessed_recordings
+    #   2. Set dataset_name: "OnlineWindowDataset"
+    #   3. Train normally (all ranks load from HDF5 concurrently)
+    # ==========================================================================
+    dataset_name: "OnlineWindowDataset"          # Options: "PreloadedDataset", "OnlineWindowDataset"
+
+    # ==========================================================================
+    # OnlineWindowDataset Specific Parameters
+    # ==========================================================================
+    # Only used when dataset_name: "OnlineWindowDataset"
+    # Ignored when using PreloadedDataset
+    preprocessed_dir: "${data_dir}/preprocessed_recordings"  # Directory for cached HDF5 files
+    samples_per_recording: 90                 # How many random chunks per recording per epoch
+                                              # Higher = more diversity but longer epoch
+                                              # Recommended: 90 for 3 minutes (approximate to sequential max full chunks in one recording)
+    force_preprocess: false                   # Force reprocessing even if cache exists
+                                              # Set true if you changed preprocessing params
+
+    # ==========================================================================
+    # DataLoader Configuration
+    # ==========================================================================
+    dataloader_config:
+      train:
+        batch_size: 32                        # Training batch size
+        shuffle: true                         # Shuffle training data
+        num_workers: 4                        # Parallel data loading workers
+                                              # Rule of thumb: 2-4 per GPU
+        pin_memory: true                      # Pin memory for GPU transfer speedup
+        drop_last: true                       # Drop incomplete last batch
+        worker_init_fn: null                  # Set automatically in code
+
+      val:
+        batch_size: 32                        # Validation batch size (can be larger)
+        shuffle: false                        # Don't shuffle validation
+        num_workers: 4
+        pin_memory: true
+        drop_last: false                      # Use all validation data
+        worker_init_fn: null
+
+      test:
+        batch_size: 50                        # Test uses batch_size=1 for proper evaluation
+        shuffle: false                        # Never shuffle test data
+        num_workers: 4
+        pin_memory: true
+        drop_last: false
+        worker_init_fn: null
+
+    # ==========================================================================
+    # Dataset Configuration (Preprocessing & Windowing)
+    # ==========================================================================
+    dataset_config:
+      # ----------------------------------------------------------------------
+      # Windowing Parameters
+      # ----------------------------------------------------------------------
+      sampling_rate: 200                      # Target sampling frequency (Hz)
+      window_duration_s: 0.2                  # Duration of each window (seconds)
+                                              # At 200Hz: 40 samples per window
+      n_windows: 20                           # Number of windows per chunk/sequence
+      window_overlap: 0.5                     # Overlap between consecutive windows
+                                              # 0.0 = no overlap, 1.0 = complete overlap
+                                              # 0.5 = 50% overlap (recommended)
+
+      # With these settings:
+      # - Window size: 40 samples
+      # - Step size: 40 * (1 - 0.5) = 20 samples
+      # - Chunk duration: (20-1)*20 + 40 = 420 samples = 2.1 seconds
+
+      # ----------------------------------------------------------------------
+      # Spike Labeling Parameters
+      # ----------------------------------------------------------------------
+      spike_overlap_threshold: 0.0            # Minimum overlap to label window as positive
+                                              # 0.0 = any overlap counts
+                                              # 0.9 = 90% of spike must be in window
+      estimated_spike_duration_s: 0.1         # Expected total spike duration (seconds)
+      first_half_spike_duration: 0.05         # Duration before spike peak
+      second_half_spike_duration: 0.05        # Duration after spike peak
+
+      # ----------------------------------------------------------------------
+      # Signal Processing Pipeline
+      # ----------------------------------------------------------------------
+      # Applied in this order:
+      # 1. Load raw data → 2. Bandpass filter → 3. Notch filter →
+      # 4. Normalize → 5. Median filter (optional)
+
+      l_freq: 1.0                             # High-pass filter cutoff (Hz)
+      h_freq: 99.0                            # Low-pass filter cutoff (Hz)
+      notch_freq: 50.0                        # Notch filter for line noise (Hz, 50 or 60)
+                                              # Set to 0 to disable notch filter
+
+      # Normalization strategy
+      normalization:
+        method: robust_zscore                 # Options: percentile, zscore, minmax,
+                                              #          robust_normalize, robust_zscore
+                                              # robust_zscore = MAD-based z-score (recommended)
+        percentile: 95                        # Only for percentile method
+        axis: null                            # Normalize over: null=all, 0=channels, 1=time
+        epsilon: 1.0e-20                      # Numerical stability constant
+
+      # Temporal smoothing (optional, usually disabled)
+      median_filter_temporal_window_ms: 0.0   # Median filter window size (ms)
+                                              # 0 = disabled, 5-10 = light smoothing
+
+      # ----------------------------------------------------------------------
+      # Data Augmentation (Training Only)
+      # ----------------------------------------------------------------------
+      noise_level: 0.1                        # Gaussian noise std for training augmentation
+                                              # 0.0 = no augmentation
+                                              # 0.1 = 10% noise (recommended)
+
+      # ----------------------------------------------------------------------
+      # Special Case Handling
+      # ----------------------------------------------------------------------
+      # Drop specific channels for problematic recordings
+      special_case_handling:
+        Liogier_AllDataset1200Hz:
+          - 'MRO22-2805'
+          - 'MRO23-2805'
+          - 'MRO24-2805'
+        # Add more patterns as needed:
+        # pattern_to_match:
+        #   - 'channel_name_1'
+        #   - 'channel_name_2'
+
+      # Skip specific files during split generation (regex patterns)
+      skip_files:
+        - ".*brana_Epi-001_20100420_05.*"
+        - ".*P283/p1.*"
+        - ".*P30/p4.*"
+
+      # ----------------------------------------------------------------------
+      # Patient Group Mappings and Annotation Rules
+      # ----------------------------------------------------------------------
+      # Maps patient group names to annotation rule sets
+      patient_group_mappings:
+        'Holdout': 'Holdout'                          # Test set (held out)
+        'IterativeLearningFeedback1': 'IterativeLearningFeedback'
+        'IterativeLearningFeedback2': 'IterativeLearningFeedback'
+        'MEG': 'MEG'
+        'Omega': 'Omega'                              # Control data (no spikes)
+
+      # Annotation rules: which annotations to include/exclude per group
+      annotation_rules:
+        Holdout:                              # Test set annotations
+          include: ["jj_add", "JJ_add", "jj_valid", "JJ_valid"]
+          exclude: []
+
+        IterativeLearningFeedback:            # Feedback-based annotations
+          include: []                         # Include all by default
+          exclude: ["detected_spike", "bad_1"] # Exclude auto-detected and bad
+
+        MEG:                                  # MEG dataset annotations
+          include: ["event"]
+          exclude: []
+
+        Omega:                                # Control dataset (healthy subjects)
+          include: []                         # No valid spike annotations
+          exclude: []
+
+        Default:                              # Fallback for unspecified groups
+          include: []
+          exclude: ["true_spike", "detected_spike", "bad_1"]
+
+# ------------------------------------------------------------------------------
+# Loss Function Configuration
+# ------------------------------------------------------------------------------
+loss:
+  name: "FocalLoss"                           # Options: FocalLoss, CrossEntropy, etc.
+
+  FocalLoss:
+    smoothing: false                          # Label smoothing
+    gamma: 2.0                                # Focusing parameter (higher = more focus on hard examples)
+    alpha: 0.25                               # Class weight (0.25 = more weight on positive class)
+                                              # For imbalanced data: alpha = 1 / (1 + neg_pos_ratio)
+
+# ------------------------------------------------------------------------------
+# Optimizer Configuration
+# ------------------------------------------------------------------------------
+optimizer:
+  name: "AdamW"                               # Options: AdamW, Adam, SGD, etc.
+
+  AdamW:
+    lr: 3.0e-4                                # Initial learning rate
+                                              # Typical range: 1e-5 to 1e-3
+    weight_decay: 1.0e-4                      # L2 regularization strength
+    # betas: [0.9, 0.999]                     # Adam beta parameters (default)
+
+# ------------------------------------------------------------------------------
+# Learning Rate Scheduler Configuration
+# ------------------------------------------------------------------------------
+scheduler:
+  name: "ReduceLROnPlateau"                   # Options: StepLR, CosineAnnealingLR,
+                                              #          ReduceLROnPlateau, OneCycleLR,
+                                              #          CosineAnnealingWarmRestarts
+
+  # Warmup (not compatible with ReduceLROnPlateau)
+  warmup:
+    enabled: false                            # Enable learning rate warmup
+    warmup_epochs: 5                          # Number of warmup epochs
+    warmup_start_lr: 1.0e-6                   # Starting LR for warmup
+    warmup_end_lr: 3.0e-4                     # Target LR after warmup
+
+  # StepLR: Decay LR by gamma every step_size epochs
+  StepLR:
+    step_size: 10                             # Decay every N epochs
+    gamma: 0.1                                # Multiplicative decay factor
+
+  # CosineAnnealingLR: Smooth cosine decay
+  CosineAnnealingLR:
+    T_max: 50                                 # Number of epochs for full cycle
+
+  # ReduceLROnPlateau: Adaptive LR reduction based on metric plateau
+  ReduceLROnPlateau:
+    mode: "min"                               # "min" for loss, "max" for metrics
+    factor: 0.5                               # Reduce LR by this factor
+    min_lr: 1.0e-7                            # Minimum learning rate
+    patience: 3                               # Wait N epochs before reducing
+
+  # OneCycleLR: One-cycle learning rate policy
+  OneCycleLR:
+    max_lr: 1.0e-3                            # Peak learning rate
+    pct_start: 0.3                            # Percentage of cycle spent increasing LR
+    div_factor: 100.0                         # Initial LR = max_lr / div_factor
+    final_div_factor: 10000.0                 # Final LR = initial_lr / final_div_factor
+    anneal_strategy: "cos"                    # Annealing: "cos" or "linear"
+    three_phase: false                        # Use three-phase schedule
+
+  # CosineAnnealingWarmRestarts: Cosine with periodic restarts
+  CosineAnnealingWarmRestarts:
+    T_0: 2                                    # First cycle length (epochs)
+    T_mult: 1                                 # Cycle length multiplier (1 = constant)
+    eta_min: 1.0e-5                           # Minimum LR at cycle end
+
+# ------------------------------------------------------------------------------
+# Training Configuration
+# ------------------------------------------------------------------------------
+trainer:
+  max_epochs: 100                             # Maximum training epochs
+  accelerator: "auto"                         # Options: "auto", "gpu", "cpu", "tpu"
+  devices: 1 #"auto"                             # Number of devices: "auto", 1, [0,1,2], etc.
+  precision: "bf16-mixed"                     # Options: "32", "16-mixed", "bf16-mixed"
+                                              # bf16-mixed = bfloat16 (faster, more stable)
+  gradient_clip_val: null                     # Global gradient clipping (null = disabled)
+                                              # Typical: 0.5-1.0 if enabled
+
+  # Batch limiting (for debugging or fast iteration)
+  limit_train_batches: 1.0                    # 1.0 = full dataset, 0.1 = 10%, or int = N batches
+  limit_val_batches: 1.0
+  limit_test_batches: 1.0
+
+  # Logging and display
+  log_every_n_steps: 50                       # Log metrics every N steps
+  enable_progress_bar: true                   # Show progress bars
+  enable_model_summary: true                  # Print model summary at start
+  profiler: null                              # Options: "simple", "advanced", null
+
+  # DDP (Distributed Data Parallel) configuration
+  ddp:
+    find_unused_parameters: true              # Find unused parameters (needed for some models)
+
+# ------------------------------------------------------------------------------
+# Callbacks Configuration
+# ------------------------------------------------------------------------------
+callbacks:
+  # Model summary callback
+  - name: "RichModelSummary"
+    RichModelSummary:
+      max_depth: 4                            # Maximum depth to display
+      show_hyperparameters: true              # Show hyperparameters
+
+  # Model checkpointing: Save best models based on different metrics
+  - name: "ModelCheckpoint"
+    ModelCheckpoint:
+      monitor: "val_loss"                     # Metric to monitor
+      mode: "min"                             # "min" or "max"
+      save_top_k: 3                           # Save top 3 checkpoints
+      save_last: true                         # Also save last checkpoint
+      filename: "{epoch:02d}-{val_loss:.2f}"  # Checkpoint filename pattern
+      verbose: true
+
+  - name: "ModelCheckpoint"
+    ModelCheckpoint:
+      monitor: "val_pr_auc"
+      mode: "max"
+      save_top_k: 3
+      save_last: false                        # Already saved by previous checkpoint
+      filename: "{epoch:02d}-{val_pr_auc:.2f}"
+      verbose: true
+
+  - name: "ModelCheckpoint"
+    ModelCheckpoint:
+      monitor: "val_f1"
+      mode: "max"
+      save_top_k: 3
+      save_last: false
+      filename: "{epoch:02d}-{val_f1:.2f}"
+      verbose: true
+
+  # Early stopping: Stop training if metric stops improving
+  - name: "EarlyStopping"
+    EarlyStopping:
+      monitor: "val_pr_auc"                   # Metric to monitor
+      mode: "max"                             # "min" or "max"
+      patience: 5                             # Wait N epochs before stopping
+      min_delta: 1.0e-6                       # Minimum improvement threshold
+      verbose: true
+
+  # Learning rate monitoring
+  - name: "LearningRateMonitor"
+    LearningRateMonitor:
+      logging_interval: "step"                # Log LR every step or epoch
+
+  # Progress bar (rich version for better display)
+  - name: "RichProgressBar"
+    RichProgressBar: {}
+
+  # Gradient monitoring and adaptive clipping
+  - name: "GradientNormLogger"
+    GradientNormLogger:
+      # Logging configuration
+      log_global_norm: true                   # Log global gradient norm
+      log_module_norms: false                 # Log per-module norms (verbose)
+      log_param_norms: false                  # Log per-parameter norms (very verbose)
+      log_histograms: false                   # Log gradient histograms to TensorBoard
+      log_percentiles: false                  # Log gradient percentiles
+      log_sparsity: true                      # Log gradient sparsity (dead neurons)
+      log_every_n_steps: 50                   # Logging frequency
+      norm_type: 2.0                          # Norm type: 2.0 (L2) or inf (max)
+      modules_to_track: null                  # Optional: ["encoder", "classifier"]
+
+      # Adaptive gradient clipping (ZClip integration)
+      use_adaptive_clipping: true             # Enable adaptive clipping
+      clip_alpha: 0.97                        # EMA smoothing (0.9-0.99)
+      clip_z_thresh: 2.5                      # Z-score threshold (2.0-3.0)
+      clip_max_norm: 1.0                      # Hard maximum norm (null to disable)
+      clip_eps: 1.0e-6                        # Numerical stability
+      clip_warmup_steps: 10                   # Warmup before clipping
+      clip_mode: "zscore"                     # "zscore" or "percentile"
+      clip_option: "adaptive_scaling"         # "adaptive_scaling" or "mean"
+      clip_factor: 1.0                        # Threshold multiplier (0.5-1.0)
+      clip_skip_update_on_spike: false        # Skip EMA update on spikes
+
+  # Temperature scaling (for calibrated predictions)
+  # Uncomment to enable:
+  # - name: "TemperatureScalingCallback"
+  #   TemperatureScalingCallback:
+  #     enabled: false                        # Enable temperature scaling
+  #     max_iter: 50                          # LBFGS max iterations
+  #     tolerance: 1.0e-5                     # Convergence tolerance
+  #     optimize_every_n_epochs: 1            # Optimize frequency
+
+  # Metrics evaluation callback (REQUIRED)
+  - name: "MetricsEvaluationCallback"
+    MetricsEvaluationCallback:
+      window_overlap: 0.5                     # Must match dataset_config.window_overlap
+
+  # Calibration diagnostics
+  - name: "CalibrationDiagnosticCallback"
+    CalibrationDiagnosticCallback:
+      n_bins: 10                              # Number of bins for reliability diagram
+      log_every_n_epochs: 1                   # Logging frequency
+
+  # Stochastic Weight Averaging (advanced technique)
+  # Uncomment to enable:
+  # - name: "StochasticWeightAveraging"
+  #   StochasticWeightAveraging:
+  #     swa_lrs: 5.0e-4                       # SWA learning rate (~50% of base LR)
+  #     swa_epoch_start: 10                   # Start SWA after N epochs
+  #     annealing_epochs: 2                   # Smooth transition epochs
+  #     annealing_strategy: "cos"             # "cos" or "linear"
+
+# ------------------------------------------------------------------------------
+# Evaluation Configuration
+# ------------------------------------------------------------------------------
+evaluation:
+  default_threshold: 0.5                      # Default classification threshold
+  compute_relaxed: true                       # Compute relaxed metrics
+                                              # (considers neighboring windows for TP)
+  threshold_optimization: true                # Optimize threshold on validation set
+  test_threshold_optimization: false          # Optimize threshold on test set
+  temperature_scaling: false                  # Enable temperature scaling
+  metrics_list:                               # Metrics to compute
+    - "pr_auc"                                # Precision-Recall AUC (most important)
+    - "roc_auc"                               # ROC AUC
+    - "accuracy"                              # Classification accuracy
+    - "balanced_accuracy"                     # Balanced accuracy
+    - "f1"                                    # F1 score
+    - "precision"                             # Precision
+    - "recall"                                # Recall/Sensitivity
+
+# ------------------------------------------------------------------------------
+# Error Handling Configuration
+# ------------------------------------------------------------------------------
+error_handling:
+  include_traceback: true                     # Include full stack traces
+  max_traceback_depth: 10                     # Maximum traceback depth
+  log_exceptions: true                        # Log exceptions to file
+
+# ==============================================================================
+# USAGE EXAMPLES
+# ==============================================================================
+#
+# 1. Quick Start (Local Development):
+#    - Set auto_generate_splits: true
+#    - Set dataset_name: "PreloadedDataset"
+#    - Run: python run_pipeline.py --config configs/custom_config.yaml
+#
+# 2. Production Training with OnlineWindowDataset (Recommended):
+#    Step 1: Generate splits once
+#      python scripts/generate_splits.py --config configs/config-splits.yaml
+#
+#    Step 2: Preprocess recordings once
+#      python scripts/preprocess_recordings.py \
+#        --config configs/custom_config.yaml \
+#        --splits-dir ${data_dir}/cv_splits \
+#        --output-dir ${data_dir}/preprocessed_recordings \
+#        --n-workers 8
+#
+#    Step 3: Update config
+#      - Set dataset_name: "OnlineWindowDataset"
+#      - Set auto_generate_splits: false
+#
+#    Step 4: Train
+#      python run_pipeline.py --config configs/custom_config.yaml
+#
+# 3. Slurm Workflow:
+#    # Job 1: Preprocessing (runs once)
+#    sbatch preprocess.slurm
+#
+#    # Job 2: Training (uses cached files, DDP-safe)
+#    sbatch --array=0-4 train.slurm  # 5-fold CV
+#
+# 4. Comparing Datasets:
+#    Run A: dataset_name: "PreloadedDataset"
+#    Run B: dataset_name: "OnlineWindowDataset"
+#    Compare convergence, generalization, and training time
+#
+# ==============================================================================

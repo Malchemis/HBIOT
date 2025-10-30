@@ -1,0 +1,2 @@
+from pipeline.data.meg_datamodules import MEGOnTheFlyDataModule, PredictionDataModule
+from pipeline.data.datamodule_registry import create_datamodule

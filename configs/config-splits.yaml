@@ -1,0 +1,60 @@
+# ----------------------------------------
+# MEG Cross-Validation Split Generation Configuration
+# ----------------------------------------
+
+# Base directory configuration
+# ---------------------------
+# Paths to source data and output directories (same as main config)
+root_dirs: 
+  - "${root_dir}"
+
+# Cross-validation configuration
+# -----------------------------
+n_splits: 5                     # Number of K-fold splits to generate
+random_state: 42                # Random seed for reproducible splits
+splits_output_dir: "${data_dir}/cv_splits"  # Directory to save split files
+
+# Logging configuration
+# -------------------
+log_level: "INFO"               # Logging level
+log_file: "${log_dir}/generate_splits.log"  # Log file path
+
+# Annotation rules (same as main config)
+# -------------------------------------
+annotation_rules:
+  # Holdout patients group annotation rules (test set)
+  Holdout:
+    include: ["jj_add", "JJ_add", "jj_valid", "JJ_valid"]
+    exclude: []
+
+  # IterativeLearningFeedback1 group annotation rules
+  IterativeLearningFeedback1:
+    include: []
+    exclude: ["detected_spike", "bad_1"]
+
+  # IterativeLearningFeedback2 group annotation rules
+  IterativeLearningFeedback2:
+    include: []
+    exclude: ["detected_spike", "bad_1"]
+
+  # MEG group annotation rules
+  MEG:
+    include: ["event"]
+    exclude: []
+  
+  # Omega dataset group annotation rules (control data)
+  Omega:
+    include: ["aaa"]  # No valid annotations
+    exclude: []
+
+  # Default rules for other groups
+  Default:
+    include: []
+    exclude: ["true_spike", "detected_spike", "bad_1"]
+
+# Files to skip
+# ------------------------------------------
+skip_files:
+  - ".*brana_Epi-001_20100420_05.*"
+  - ".*P283/p1.*"
+  - ".*P30/p4.*"
