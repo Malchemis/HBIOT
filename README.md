@@ -280,6 +280,7 @@ If you use this code in your research, please cite:
 ```
 
 In this repository we used ZCLIP:
+```bibtex
 @misc{kumar2025zclipadaptivespikemitigation,
       title={ZClip: Adaptive Spike Mitigation for LLM Pre-Training}, 
       author={Abhay Kumar and Louis Owen and Nilabhra Roy Chowdhury and Fabian Güra},
@@ -289,8 +290,9 @@ In this repository we used ZCLIP:
       primaryClass={cs.LG},
       url={https://arxiv.org/abs/2504.02507}, 
 }
-
+```
 And extend work from original BIOT:
+```bibtex
 @inproceedings{yang2023biot,
     title={BIOT: Biosignal Transformer for Cross-data Learning in the Wild},
     author={Yang, Chaoqi and Westover, M Brandon and Sun, Jimeng},
@@ -304,4 +306,4 @@ And extend work from original BIOT:
   journal={arXiv preprint arXiv:2305.10351},
   year={2023}
 }
-
+``
