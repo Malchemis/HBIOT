@@ -23,7 +23,7 @@ pip install -r requirements.txt
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.12
 - PyTorch 2.0+
 - PyTorch Lightning 2.0+
 - MNE-Python (for MEG data loading)
@@ -152,28 +152,28 @@ data:
 model:
   name: BIOTHierarchical
   BIOTHierarchical:
-    local_depth: 2                 # Local transformer depth
-    global_depth: 2                # Global transformer depth
-    dim: 128                       # Model dimension
-    num_heads: 8                   # Attention heads
-    mlp_ratio: 4                   # MLP expansion ratio
+    window_encoder_depth: 2        # Local transformer depth
+    inter_window_depth: 2          # Global transformer depth
+    emb_size: 256                  # Model dimension
+    heads: 4                       # Attention heads
+    mode: "raw"                    # Input mode: "raw", "spec", "features"
 ```
 
 ### Training Configuration
 
 ```yaml
 trainer:
-  max_epochs: 50
-  accelerator: gpu
-  devices: 1
+  max_epochs: 100
+  accelerator: "auto"
+  devices: "auto"
   precision: 16-mixed              # Mixed precision training
-  gradient_clip_val: 1.0
+  gradient_clip_val: null          # We use ZClip
 
 optimizer:
   name: AdamW
   AdamW:
-    lr: 0.0001
-    weight_decay: 0.01
+    lr: 0.0003
+    weight_decay: 0.0001
 
 loss:
   name: FocalLoss
@@ -270,14 +270,6 @@ CNN baseline with:
 - Temporal convolutions
 - Batch normalization
 - Global average pooling
-
-### FAMED
-
-Frequency-aware architecture with:
-- Multi-scale feature extraction
-- Squeeze-and-Excitation blocks
-- Attention mechanisms
-
 
 ## Citation and references
 
