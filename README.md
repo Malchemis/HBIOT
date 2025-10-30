@@ -212,9 +212,6 @@ python run_pipeline.py --config configs/default_config.yaml --use_cls_token
 
 # Use mean pooling
 python run_pipeline.py --config configs/default_config.yaml --use_mean_pool 2
-
-# Use attention-based token selection
-python run_pipeline.py --config configs/default_config.yaml --n_selected_tokens 10
 ```
 
 ### Custom Evaluation Metrics
@@ -224,7 +221,6 @@ The pipeline computes relaxed metrics with temporal tolerance:
 - **PR-AUC**: Precision-Recall Area Under Curve
 - **ROC-AUC**: Receiver Operating Characteristic AUC
 - **Relaxed F1**: F1 score with temporal tolerance window
-- **IoU**: Intersection over Union for spike detection
 
 Tolerance windows account for the inherent uncertainty in spike timing annotations.
 
@@ -266,7 +262,7 @@ A transformer-based architecture designed for biosignal processing with:
 Extends BIOT with two-level hierarchy:
 - **Local transformer**: Processes individual windows
 - **Global transformer**: Aggregates information across windows
-- **Token selection**: Flexible pooling strategies (CLS, mean, attention-based)
+- **Token selection**: Flexible pooling strategies (CLS, extremals, central moments)
 
 ### SFCN (Shallow Fully Convolutional Network)
 
@@ -283,11 +279,37 @@ Frequency-aware architecture with:
 - Attention mechanisms
 
 
-## Citation
+## Citation and references
 
 If you use this code in your research, please cite:
 
 ```bibtex
 [to be added]
 ```
+
+In this repository we used ZCLIP:
+@misc{kumar2025zclipadaptivespikemitigation,
+      title={ZClip: Adaptive Spike Mitigation for LLM Pre-Training}, 
+      author={Abhay Kumar and Louis Owen and Nilabhra Roy Chowdhury and Fabian Güra},
+      year={2025},
+      eprint={2504.02507},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2504.02507}, 
+}
+
+And extend work from original BIOT:
+@inproceedings{yang2023biot,
+    title={BIOT: Biosignal Transformer for Cross-data Learning in the Wild},
+    author={Yang, Chaoqi and Westover, M Brandon and Sun, Jimeng},
+    booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
+    year={2023},
+    url={https://openreview.net/forum?id=c2LZyTyddi}
+}
+@article{yang2023biot,
+  title={BIOT: Cross-data Biosignal Learning in the Wild},
+  author={Yang, Chaoqi and Westover, M Brandon and Sun, Jimeng},
+  journal={arXiv preprint arXiv:2305.10351},
+  year={2023}
+}
 
