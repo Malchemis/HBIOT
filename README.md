@@ -14,8 +14,8 @@ A PyTorch Lightning-based deep learning framework for detecting interictal epile
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd meg-spike-detection
+git clone https://github.com/Malchemis/HBIOT.git
+cd HBIOT
 
 # Install dependencies
 pip install -r requirements.txt
