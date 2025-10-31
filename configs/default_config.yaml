@@ -21,7 +21,7 @@ experiment:
   name: "${experiment_name}"     # Name of the experiment (from environment)
   version: "${version}"          # Version identifier for this run
   seed: 42                       # Global random seed for reproducibility
-  checkpoint_path: "${checkpoint_path}"          # Path to checkpoint for resuming (null = fresh start)
+  checkpoint_path: null          # Path to checkpoint for resuming (null = fresh start)
 
 # ------------------------------------------------------------------------------
 # Logging Configuration

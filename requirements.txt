@@ -21,4 +21,3 @@ scipy
 x-transformers
 pytest
 rich
-"git+https://github.com/bluorion-com/ZClip.git#egg=zclip[lightning]"
