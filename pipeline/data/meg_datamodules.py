@@ -128,8 +128,9 @@ class MEGOnTheFlyDataModule(L.LightningDataModule):
         torch.manual_seed(self.seed)
         torch.cuda.manual_seed(self.seed)
         torch.cuda.manual_seed_all(self.seed)
-        torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
     @staticmethod
     def seed_worker(worker_id: int) -> None:

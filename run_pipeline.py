@@ -67,8 +67,9 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
     L.seed_everything(seed, workers=True)
 
 
@@ -273,7 +274,7 @@ def main(config_path: str, test_only: bool = False, token_selection_dict: Option
         **trainer_config,
         "callbacks": callbacks,
         "logger": tb_logger,
-        "deterministic": True,
+        # "deterministic": True,
     }
 
     if strategy is not None:

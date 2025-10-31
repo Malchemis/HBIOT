@@ -206,7 +206,8 @@ class MEGSpikeDetector(L.LightningModule):
             if 'unknown_mask' in kwargs and kwargs['unknown_mask'] is not None:
                 unknown_mask = kwargs['unknown_mask'].unsqueeze(1).repeat(1, n_windows, 1).view(batch_size * n_windows, n_channels)
                 kwargs['unknown_mask'] = unknown_mask  # [B×N_window, n_channels]
-            result = self.model(x, channel_mask, *args, **kwargs)  # [B×N_window, n_classes]
+            kwargs['channel_mask'] = channel_mask
+            result = self.model(x, *args, **kwargs)  # [B×N_window, n_classes]
             return result.view(batch_size, n_windows, -1).squeeze(-1)  # [batch_size, n_windows, n_classes]
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]) -> torch.Tensor:
