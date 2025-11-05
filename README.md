@@ -264,7 +264,7 @@ Extends BIOT with two-level hierarchy:
 - **Global transformer**: Aggregates information across windows
 - **Token selection**: Flexible pooling strategies (CLS, extremals, central moments)
 
-### SFCN (Shallow Fully Convolutional Network)
+### SFCN (Simple Fully Convolutional Network)
 
 CNN baseline with:
 - Temporal convolutions

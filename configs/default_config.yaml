@@ -38,7 +38,7 @@ logging:
 # Model Architecture Configuration
 # ------------------------------------------------------------------------------
 model:
-  name: "BIOT"  # Options: BIOT, BIOTHierarchical, SFCN, FAMED
+  name: "BIOTHierarchical"  # Options: BIOT, BIOTHierarchical, SFCN, FAMED, EMSNET
 
   # BIOTHierarchical: Two-stage transformer (window-level + sequence-level)
   BIOTHierarchical:
@@ -92,14 +92,17 @@ model:
     n_selected_tokens: 0           # Number of attention-selected tokens
     selection_temperature: 1.0     # Temperature for token selection softmax
 
-  # SFCN: Shallow Fully Convolutional Network (baseline)
+  # EMSNET: Conv1D local features + 2D convs for spatiotemporal patterns
+  EMSNET: {}
+
+  # SFCN: Simple Fully Convolutional Network (baseline)
   SFCN:
     conv_channels: [32, 64, 128, 256, 64]
     conv_kernel_sizes: [5, 5, 5, 5, 1]
     pool_kernel_size: 2
     dropout: 0.5
 
-  # FAMED: Another baseline architecture
+  # FAMED: SE-ResNet adapted for MEG spike detection
   FAMED:
     layers: [2, 2, 2, 2]
     ch_num: 275

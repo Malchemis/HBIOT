@@ -184,7 +184,7 @@ def _validate_model_config(model_config: Dict[str, Any]) -> None:
         raise ValueError("Model configuration must contain 'name' field")
     
     model_name = model_config['name']
-    valid_models = ['BIOT', 'BIOTHierarchical', 'SFCN', 'FAMED']
+    valid_models = ['BIOT', 'BIOTHierarchical', 'SFCN', 'FAMED', 'EMSNET']
     if model_name not in valid_models:
         raise ValueError(f"Invalid model name: {model_name}. Valid models: {valid_models}")
     

@@ -13,6 +13,7 @@ from pipeline.models.biot import BIOTClassifier
 from pipeline.models.hbiot import BIOTHierarchicalClassifier
 from pipeline.models.sfcn import SFCN
 from pipeline.models.famed import FAMEDWrapper
+from pipeline.models.emsnet import EMSNET
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ MODEL_REGISTRY: Dict[str, Type[nn.Module]] = {
     "BIOT": BIOTClassifier,
     "BIOTHierarchical": BIOTHierarchicalClassifier,
     "SFCN": SFCN,
-    "FAMED": FAMEDWrapper
+    "FAMED": FAMEDWrapper,
+    "EMSNET": EMSNET,
 }
 
 
