@@ -4,7 +4,7 @@ A PyTorch Lightning-based deep learning framework for detecting interictal epile
 
 ## Features
 
-- **Transformer-based Models**: Support for BIOT, Hierarchical BIOT, SFCN, and FAMED architectures
+- **Transformer-based Models**: Support for BIOT, Hierarchical BIOT, SFCN, EMS-Net (adapted) and FAMED architectures
 - **Efficient Data Processing**: HDF5-based preprocessing with online random windowing
 - **Flexible Training**: PyTorch Lightning with DDP support for multi-GPU training
 - **Comprehensive Evaluation**: Relaxed metrics with temporal tolerance for realistic spike detection
@@ -78,7 +78,7 @@ python run_pipeline.py --config configs/default_config.yaml --batch_size 32
 # Test only mode (skip training)
 python run_pipeline.py --config configs/default_config.yaml --test-only
 
-# Custom number of windows
+# Custom number of windows (for H-BIOT)
 python run_pipeline.py --config configs/default_config.yaml --n_windows 20
 ```
 
@@ -99,29 +99,30 @@ python scripts/predict.py \
 ```
 meg-spike-detection/
 ├── configs/
-│   ├── config-splits.yaml       # Stratified K-fold splits configuration
+│   ├── config-splits.yaml        # Stratified K-fold splits configuration
 │   └── default_config.yaml       # Main configuration file
 ├── scripts/
 │   ├── generate_splits.py        # Generate train/val/test splits
 │   ├── predict.py                # Run inference on new data
 │   └── preprocess_recordings.py  # Preprocess MEG to HDF5
 ├── pipeline/
-│   ├── data/                     # Data loading and preprocessing
+│   ├── data/                    # Data loading and preprocessing
 │   │   ├── meg_datasets.py       # Dataset implementations
 │   │   ├── meg_datamodules.py    # Lightning DataModules
 │   │   └── preprocessing/        # Signal processing utilities
-│   ├── models/                   # Model architectures
-│   │   ├── biot.py              # BIOT transformer
-│   │   ├── hbiot.py             # Hierarchical BIOT
-│   │   ├── sfcn.py              # SFCN baseline
-│   │   └── famed.py             # FAMED model
-│   ├── training/                 # Training components
+│   ├── models/                  # Model architectures
+│   │   ├── biot.py               # BIOT transformer
+│   │   ├── hbiot.py              # Hierarchical BIOT
+│   │   ├── sfcn.py               # SFCN baseline
+│   │   ├── emsnet.py             # EMS-Net baseline
+│   │   └── famed.py              # FAMED model
+│   ├── training/                # Training components
 │   │   ├── lightning_module.py   # Lightning module
 │   │   └── callback_registry.py  # Custom callbacks
-│   ├── eval/                     # Evaluation metrics
-│   ├── optim/                    # Optimizers and losses
-│   └── utils/                    # Utilities
-├── requirements.txt              # Python dependencies
+│   ├── eval/                    # Evaluation metrics
+│   ├── optim/                   # Optimizers and losses
+│   └── utils/                   # Utilities
+├── requirements.txt             # Python dependencies
 └── run_pipeline.py              # Main training script
 ```
 
@@ -210,7 +211,7 @@ For the Hierarchical BIOT model, you can configure token selection:
 # Use CLS token
 python run_pipeline.py --config configs/default_config.yaml --use_cls_token
 
-# Use mean pooling
+# Use central moments (here mean and variance)
 python run_pipeline.py --config configs/default_config.yaml --use_mean_pool 2
 ```
 
@@ -293,17 +294,15 @@ In this repository we used ZCLIP:
 ```
 And extend work from original BIOT:
 ```bibtex
-@inproceedings{yang2023biot,
-    title={BIOT: Biosignal Transformer for Cross-data Learning in the Wild},
-    author={Yang, Chaoqi and Westover, M Brandon and Sun, Jimeng},
-    booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-    year={2023},
-    url={https://openreview.net/forum?id=c2LZyTyddi}
-}
-@article{yang2023biot,
-  title={BIOT: Cross-data Biosignal Learning in the Wild},
-  author={Yang, Chaoqi and Westover, M Brandon and Sun, Jimeng},
-  journal={arXiv preprint arXiv:2305.10351},
-  year={2023}
+@inproceedings{NEURIPS2023_f6b30f3e,
+ author = {Yang, Chaoqi and Westover, M and Sun, Jimeng},
+ booktitle = {Advances in Neural Information Processing Systems},
+ editor = {A. Oh and T. Naumann and A. Globerson and K. Saenko and M. Hardt and S. Levine},
+ pages = {78240--78260},
+ publisher = {Curran Associates, Inc.},
+ title = {BIOT: Biosignal Transformer for Cross-data Learning in the Wild},
+ url = {https://proceedings.neurips.cc/paper_files/paper/2023/file/f6b30f3e2dd9cb53bbf2024402d02295-Paper-Conference.pdf},
+ volume = {36},
+ year = {2023}
 }
 ``
