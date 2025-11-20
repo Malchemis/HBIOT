@@ -411,7 +411,7 @@ scheduler:
 trainer:
   max_epochs: 100                             # Maximum training epochs
   accelerator: "auto"                         # Options: "auto", "gpu", "cpu", "tpu"
-  devices: 1 #"auto"                             # Number of devices: "auto", 1, [0,1,2], etc.
+  devices: "auto"                             # Number of devices: "auto", 1, [0,1,2], etc.
   precision: "bf16-mixed"                     # Options: "32", "16-mixed", "bf16-mixed"
                                               # bf16-mixed = bfloat16 (faster, more stable)
   gradient_clip_val: null                     # Global gradient clipping (null = disabled)

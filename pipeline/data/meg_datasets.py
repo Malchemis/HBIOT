@@ -387,7 +387,9 @@ class PredictDataset(torch.utils.data.Dataset):
             window_start = global_idx * window_step
             window_end = window_start + window_duration_samples
             window_center = window_start + window_duration_samples // 2
-
+            
+            assert self.sampling_rate is not None, "Sampling rate not set"
+            assert self.meg_data is not None, "MEG data not loaded"
             peak_sample, peak_time = find_gfp_peak_in_window(
                 self.meg_data, window_start, window_end, self.sampling_rate
             )

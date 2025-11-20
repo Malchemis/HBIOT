@@ -272,15 +272,13 @@ def preprocess_and_cache_files(
 
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
-    results = Parallel(n_jobs=n_workers, backend='threading')(
+    results: List[bool] = Parallel(n_jobs=n_workers, backend='threading')(
         delayed(_preprocess_and_cache_single_file)(
             fp, config, good_channels, cache_dir, force, compiled_patterns
         )
         for fp in tqdm(file_paths, desc="Preprocessing files", unit="file")
-    )
-
-    assert type(results) is list
-
+    ) # type: ignore
+    
     n_processed = sum(results)
     n_cached = len(results) - n_processed
     n_failed = len(file_paths) - len(results)

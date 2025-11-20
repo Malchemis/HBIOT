@@ -233,7 +233,7 @@ class BIOTHierarchicalClassifier(nn.Module):
         else:
             # Single token classification with simple MLP
             from pipeline.models.commons import ClassificationHead
-            self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes)
+            self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes, **classifier)
 
     def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None, window_mask: Optional[torch.Tensor] = None, unk_augment: float = 0.0, unknown_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass of the BIOT hierarchical encoder with detailed shape tracking.

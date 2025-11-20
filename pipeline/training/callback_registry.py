@@ -983,6 +983,7 @@ class GradientNormLogger(L.Callback):
             return 0.0
 
         first_param = parameters[0]
+        assert first_param.grad is not None, "First parameter has no gradient."
         device = first_param.grad.device
         dtype = first_param.dtype
 
@@ -1005,13 +1006,14 @@ class GradientNormLogger(L.Callback):
         # Regular model or non-L2 norm
         if self.norm_type == float('inf'):
             # Infinity norm: max of absolute values
-            total_norm = max(p.grad.detach().abs().max().to(device) for p in parameters)
+            total_norm = max(p.grad.detach().abs().max().to(device) for p in parameters if p.grad is not None)
         else:
             # L2 norm (most common)
             total_norm = torch.norm(
                 torch.stack([
                     torch.norm(p.grad.detach(), self.norm_type).to(device)
                     for p in parameters
+                    if p.grad is not None
                 ]),
                 self.norm_type
             )
@@ -1032,7 +1034,7 @@ class GradientNormLogger(L.Callback):
         # Handle both LightningModule (with .model attribute) and regular nn.Module
         model = pl_module.model if hasattr(pl_module, 'model') else pl_module
 
-        for module_name, module in model.named_modules():
+        for module_name, module in model.named_modules(): # type: ignore
             # Skip empty module names and containers without parameters
             if not module_name:
                 continue
@@ -1048,14 +1050,16 @@ class GradientNormLogger(L.Callback):
                 continue
 
             # Compute norm for this module
+            assert parameters[0].grad is not None, "Parameter has no gradient."
             device = parameters[0].grad.device
             if self.norm_type == float('inf'):
-                norm = max(p.grad.detach().abs().max().to(device) for p in parameters)
+                norm = max(p.grad.detach().abs().max().to(device) for p in parameters if p.grad is not None)
             else:
                 norm = torch.norm(
                     torch.stack([
                         torch.norm(p.grad.detach(), self.norm_type).to(device)
                         for p in parameters
+                        if p.grad is not None
                     ]),
                     self.norm_type
                 )
@@ -1082,7 +1086,7 @@ class GradientNormLogger(L.Callback):
         # Handle both LightningModule (with .model attribute) and regular nn.Module
         model = pl_module.model if hasattr(pl_module, 'model') else pl_module
 
-        for param_name, param in model.named_parameters():
+        for param_name, param in model.named_parameters(): # type: ignore
             if param.grad is None:
                 continue
 
@@ -1308,12 +1312,13 @@ class TemperatureScalingCallback(L.Callback):
         gt_tensor = torch.from_numpy(gt).float().to(pl_module.device)
 
         # Optimize temperature
+        assert isinstance(pl_module.temperature, nn.Parameter)
         initial_temp = pl_module.temperature.item()
         optimized_temp = self._optimize_temperature(logits_tensor, gt_tensor, pl_module.temperature)
 
         # Update temperature in Lightning module
         pl_module.temperature.data = torch.tensor([optimized_temp], device=pl_module.device)
-        pl_module.hparams["temperature"] = optimized_temp  # type: ignore
+        pl_module.hparams["temperature"] = optimized_temp
 
         # Log the optimized temperature
         pl_module.log("temperature", optimized_temp, sync_dist=True, on_epoch=True)
@@ -1636,8 +1641,8 @@ class CalibrationDiagnosticCallback(L.Callback):
             ax.set_title('Reliability Diagram - Model Calibration', fontsize=14, fontweight='bold')
             ax.legend(fontsize=10, loc='upper left')
             ax.grid(alpha=0.3, linestyle='--')
-            ax.set_xlim([0, 1])
-            ax.set_ylim([0, 1])
+            ax.set_xlim((0, 1))
+            ax.set_ylim((0, 1))
             ax.set_aspect('equal')
 
             # Convert plot to image tensor
@@ -1650,6 +1655,7 @@ class CalibrationDiagnosticCallback(L.Callback):
             img_array = np.array(img)
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
 
+            assert trainer.logger is not None
             trainer.logger.experiment.add_image(
                 'calibration/reliability_diagram',
                 img_tensor,
