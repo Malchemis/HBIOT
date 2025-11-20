@@ -105,15 +105,6 @@ class MEGSpikeDetector(L.LightningModule):
         if self.scheduler_config:
             logger.info(f"Scheduler config: {self.scheduler_config}")
 
-        # Temperature scaling configuration and validation
-        self.temperature_scaling_enabled = config["evaluation"].get("temperature_scaling", False)
-        # Classification threshold (can be updated by MetricsEvaluationCallback if threshold_optimization=True)
-        self.threshold = config["evaluation"].get("default_threshold", 0.5)
-
-        # Temperature scaling for calibrated predictions (1.0 = no scaling)
-        self.temperature = nn.Parameter(torch.ones(1) * 1.0)
-        self.temperature.requires_grad = False  # Only optimized during temperature scaling phase
-
         # Log the graph to TensorBoard
         logger.info("ConfigurableLightningModule initialized successfully")
               
@@ -124,13 +115,6 @@ class MEGSpikeDetector(L.LightningModule):
             if "threshold" in checkpoint["hyper_parameters"]:
                 self.threshold = checkpoint["hyper_parameters"]["threshold"]
                 logger.info(f"Restored threshold from checkpoint: {self.threshold:.4f}")
-            if "temperature" in checkpoint["hyper_parameters"]:
-                temp_value = checkpoint["hyper_parameters"]["temperature"]
-                if isinstance(temp_value, torch.Tensor):
-                    self.temperature.data = temp_value.to(self.temperature.device)
-                else:
-                    self.temperature.data = torch.tensor([temp_value], device=self.temperature.device)
-                logger.info(f"Restored temperature from checkpoint: {self.temperature.item():.4f}")
     
     def dummy_forward_init(self) -> None:
         """Runs a dummy forward pass to initialize the model.
@@ -148,22 +132,6 @@ class MEGSpikeDetector(L.LightningModule):
                 # Use actual input shape for proper initialization
                 dummy_input = torch.randn(1, self.input_shape[1], self.input_shape[2])
                 self.model(dummy_input)
-
-    def apply_temperature_scaling(self, logits: torch.Tensor) -> torch.Tensor:
-        """Apply temperature scaling to logits for calibrated predictions.
-
-        Temperature scaling divides logits by a learned temperature parameter T:
-        - T > 1: Makes predictions less confident (smoother probabilities)
-        - T = 1: No scaling (default)
-        - T < 1: Makes predictions more confident (sharper probabilities)
-
-        Args:
-            logits: Raw model logits [batch_size, n_windows, n_classes] or [batch_size, n_windows]
-
-        Returns:
-            Temperature-scaled logits of the same shape
-        """
-        return logits / self.temperature
 
     def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None, window_mask: Optional[torch.Tensor] = None, force_sequential: bool = False, *args, **kwargs) -> torch.Tensor:
         """Forward pass of the model with contextual and sequential processing support.
@@ -208,7 +176,7 @@ class MEGSpikeDetector(L.LightningModule):
                 kwargs['unknown_mask'] = unknown_mask  # [B×N_window, n_channels]
             kwargs['channel_mask'] = channel_mask
             result = self.model(x, *args, **kwargs)  # [B×N_window, n_classes]
-            return result.view(batch_size, n_windows, -1).squeeze(-1)  # [batch_size, n_windows, n_classes]
+            return result.view(batch_size, n_windows, -1)  # [batch_size, n_windows, n_classes]
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]) -> torch.Tensor:
         """Perform a single training step.
@@ -341,10 +309,7 @@ class MEGSpikeDetector(L.LightningModule):
 
         # Forward pass with batch-aware channel mask
         logits = self.forward(X, channel_mask=channel_mask, window_mask=window_mask, force_sequential=True, unknown_mask=unknown_mask)
-
-        # Apply temperature scaling and compute calibrated probabilities
-        scaled_logits = self.apply_temperature_scaling(logits)
-        probs = torch.sigmoid(scaled_logits).cpu().detach()
+        probs = torch.sigmoid(logits).cpu().detach()
 
         # Apply threshold for binary predictions
         predictions = (probs >= self.threshold).float()
@@ -376,21 +341,38 @@ class MEGSpikeDetector(L.LightningModule):
         """
         X, y, window_mask, _channel_mask, metadata = batch
 
-        # Apply temperature scaling for calibrated probabilities
-        scaled_logits = self.apply_temperature_scaling(logits)
+        if hasattr(self.loss_fn, 'history_presence_loss') and hasattr(self.loss_fn, 'history_onset_loss'):
+            per_window_loss = self.loss_fn.history_presence_loss.pop().cpu().detach().float().numpy() if self.loss_fn.history_presence_loss else None    # type: ignore
+            onset_loss = self.loss_fn.history_onset_loss.pop().cpu().detach().float().numpy() if self.loss_fn.history_onset_loss else None        # type: ignore
+        else:
+            per_window_loss = None
+            onset_loss = None
 
-        # Compute per-window BCE loss without reduction for analysis (using scaled logits)
-        # Note: Both scaled_logits and y are [B, N] for binary classification
-        per_window_loss = torch.nn.functional.binary_cross_entropy_with_logits(scaled_logits, y, reduction='none')
-        probs = torch.sigmoid(scaled_logits)
+        has_onset = logits.size(-1) == 2
+
+        if has_onset:
+            presence_logits = logits[..., 0]
+            onset_logits = logits[..., 1]
+            presence_probs = torch.sigmoid(presence_logits)
+            onset_probs = torch.sigmoid(onset_logits)
+        else:
+            presence_logits = logits
+            presence_probs = torch.sigmoid(logits)
+            onset_probs = None
+
+        gt_presence = y[..., 0] if y.dim() > 2 and y.size(-1) >= 2 else y
+        gt_onsets = y[..., 1] if y.dim() > 2 and y.size(-1) >= 2 else None
 
         return {
             "logits": logits.cpu().detach().float().numpy(),
-            "probs": probs.cpu().detach().float().numpy(),
-            "predictions": (probs >= self.threshold).float().cpu().detach().numpy(),
-            "gt": y.cpu().detach().float().numpy(),
+            "probs": presence_probs.cpu().detach().float().numpy(),
+            "onset_probs": onset_probs.cpu().detach().float().numpy() if onset_probs is not None else None,
+            "predictions": (presence_probs >= self.threshold).float().cpu().detach().numpy(),
+            "gt": gt_presence.cpu().detach().float().numpy(),
+            "gt_onsets": gt_onsets.cpu().detach().float().numpy() if gt_onsets is not None else None,
             "mask": window_mask.cpu().detach().float().numpy(),
-            "losses": per_window_loss.cpu().detach().float().numpy(),  # Per-window losses
+            "losses": per_window_loss,
+            "onset_losses": onset_loss,
             "metadata": metadata if metadata else {},
             "batch_size": X.shape[0],
             "n_windows": X.shape[1]

@@ -557,7 +557,7 @@ def padded_collate_fn(batch):
         n = data.shape[0]
         pad = max_windows - n
         padded_data.append(torch.cat([data, torch.zeros(pad, *data.shape[1:])]))
-        padded_labels.append(torch.cat([label, torch.zeros(pad)]))
+        padded_labels.append(torch.cat([label, torch.zeros(pad, *label.shape[1:])]))
         window_mask_list.append(torch.cat([torch.ones(n), torch.zeros(pad)]))
 
         if has_meta and meta_list:

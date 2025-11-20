@@ -266,7 +266,6 @@ class MetricsEvaluationCallback(L.Callback):
         # Reset aggregator
         self.metrics_aggregator.reset()
 
-        # Update aggregator with all batch outputs
         for batch_output in outputs:
             self.metrics_aggregator.update(
                 probs=batch_output["probs"],
@@ -276,6 +275,9 @@ class MetricsEvaluationCallback(L.Callback):
                 n_windows=batch_output["n_windows"],
                 metadata=batch_output.get("metadata"),
                 losses=batch_output.get("losses"),
+                onset_probs=batch_output.get("onset_probs"),
+                gt_onsets=batch_output.get("gt_onsets"),
+                onset_losses=batch_output.get("onset_losses"),
             )
 
         # Compute metrics
@@ -286,10 +288,7 @@ class MetricsEvaluationCallback(L.Callback):
         return scalar_metrics  # type: ignore
 
     def _log_probability_distributions(self, trainer: L.Trainer) -> None:
-        """Log probability distributions for class 0 and class 1 to TensorBoard.
-
-        This helps visualize how well the model is separating the two classes.
-        Ideally, class 0 probabilities should cluster near 0, and class 1 near 1.
+        """Log probability distributions for presence and onset predictions to TensorBoard.
 
         Args:
             trainer: Lightning trainer instance
@@ -298,64 +297,78 @@ class MetricsEvaluationCallback(L.Callback):
             return
 
         import numpy as np
+        import torch
 
-        # Collect all probabilities and ground truth labels
         all_probs = []
         all_gt = []
         all_masks = []
+        all_onset_probs = []
+        all_gt_onsets = []
 
         for output in self.validation_outputs:
-            # Flatten each batch individually to handle variable N across batches
-            # (some recordings may have fewer windows than max_N after padding)
             all_probs.append(output["probs"].flatten())
             all_gt.append(output["gt"].flatten())
             if output.get("mask") is not None:
                 all_masks.append(output["mask"].flatten())
+            if output.get("onset_probs") is not None:
+                all_onset_probs.append(output["onset_probs"].flatten())
+            if output.get("gt_onsets") is not None:
+                all_gt_onsets.append(output["gt_onsets"].flatten())
 
-        # Concatenate flattened arrays (all are now 1D)
         probs = np.concatenate(all_probs)
         gt = np.concatenate(all_gt)
 
-        # Apply mask if available (filter out padded/invalid samples)
         if all_masks:
             masks = np.concatenate(all_masks)
             valid_indices = masks > 0
             probs = probs[valid_indices]
             gt = gt[valid_indices]
 
-        # Separate probabilities by class
-        class_0_probs = probs[gt == 0]  # Non-spike windows
-        class_1_probs = probs[gt == 1]  # Spike windows
+        class_0_probs = probs[gt == 0]
+        class_1_probs = probs[gt == 1]
 
-        # Log histograms to TensorBoard
         try:
-            # Convert to torch tensors for TensorBoard
-            import torch
-
             if len(class_0_probs) > 0:
                 trainer.logger.experiment.add_histogram(
-                    'val_probability_distribution/class_0_non_spike',
+                    'val_probability_distribution/presence_non_spike',
                     torch.from_numpy(class_0_probs),
                     global_step=trainer.current_epoch
                 )
 
             if len(class_1_probs) > 0:
                 trainer.logger.experiment.add_histogram(
-                    'val_probability_distribution/class_1_spike',
+                    'val_probability_distribution/presence_spike',
                     torch.from_numpy(class_1_probs),
                     global_step=trainer.current_epoch
                 )
 
-            # Log summary statistics for monitoring
-            if len(class_0_probs) > 0 and len(class_1_probs) > 0:
-                self.logger.debug(
-                    f"Probability distributions - "
-                    f"Class 0 (non-spike): mean={class_0_probs.mean():.4f}, "
-                    f"Class 1 (spike): mean={class_1_probs.mean():.4f}"
-                )
+            if all_onset_probs and all_gt_onsets:
+                onset_probs = np.concatenate(all_onset_probs)
+                gt_onsets = np.concatenate(all_gt_onsets)
+
+                if all_masks:
+                    onset_probs = onset_probs[valid_indices]
+                    gt_onsets = gt_onsets[valid_indices]
+
+                spike_mask = gt == 1
+                if spike_mask.sum() > 0:
+                    spike_onset_preds = onset_probs[spike_mask]
+                    spike_onset_gt = gt_onsets[spike_mask]
+
+                    trainer.logger.experiment.add_histogram(
+                        'val_onset_distribution/predicted_onsets',
+                        torch.from_numpy(spike_onset_preds),
+                        global_step=trainer.current_epoch
+                    )
+
+                    trainer.logger.experiment.add_histogram(
+                        'val_onset_distribution/ground_truth_onsets',
+                        torch.from_numpy(spike_onset_gt),
+                        global_step=trainer.current_epoch
+                    )
 
         except Exception as e:
-            self.logger.debug(f"Could not log probability distributions: {e}")
+            self.logger.debug(f"Could not log distributions: {e}")
 
     def _save_predictions_csv(
         self,
@@ -393,7 +406,9 @@ class MetricsEvaluationCallback(L.Callback):
             batch_size = output['batch_size']
             metadata_list = output['metadata']
 
-            # Metadata is a list of dicts (one dict per sample in batch)
+            onset_preds = output.get('onset_probs')
+            onset_gt = output.get('gt_onsets')
+
             if not isinstance(metadata_list, list):
                 self.logger.error(f"Expected metadata to be a list, got {type(metadata_list)}")
                 continue
@@ -405,21 +420,17 @@ class MetricsEvaluationCallback(L.Callback):
 
                 sample_meta = metadata_list[i]
 
-                # Format predictions for this sample
                 pred_probs = predictions[i].flatten()
                 pred_classes = (pred_probs >= threshold).astype(int)
                 gt_flat = ground_truth[i].flatten()
 
-                # Extract metadata using unified naming convention
                 chunk_onset = sample_meta.get('chunk_onset_sample', 0)
-                # chunk_idx is per-file, global_chunk_idx is across dataset (OnlineWindowDataset only)
                 global_chunk_idx = sample_meta.get('global_chunk_idx', None)
-                chunk_idx = sample_meta.get('chunk_idx', sample_meta.get('chunk_index', 0))  # Fallback for old format
+                chunk_idx = sample_meta.get('chunk_idx', sample_meta.get('chunk_index', 0))
                 spikes = sample_meta.get('spike_positions_in_chunk', [])
                 start_window_idx = sample_meta.get('start_window_idx', 0)
                 end_window_idx = sample_meta.get('end_window_idx', 0)
 
-                # Extract preprocessing config
                 preprocessing_config = sample_meta.get('preprocessing_config', {})
                 sampling_rate = preprocessing_config.get('sampling_rate', 0) if isinstance(preprocessing_config, dict) else 0
 
@@ -431,10 +442,10 @@ class MetricsEvaluationCallback(L.Callback):
                     'group': sample_meta.get('group', 'Unknown'),
                     'global_chunk_idx': global_chunk_idx,
                     'chunk_onset_sample': chunk_onset,
-                    'chunk_index': chunk_idx,  # Keep for backward compatibility (alias for chunk_idx)
-                    'chunk_idx': chunk_idx,  # Unified field name
-                    'start_window_idx': start_window_idx,  # Window traceability
-                    'end_window_idx': end_window_idx,  # Window traceability
+                    'chunk_index': chunk_idx,
+                    'chunk_idx': chunk_idx,
+                    'start_window_idx': start_window_idx,
+                    'end_window_idx': end_window_idx,
                     'spike_positions_in_chunk': spikes,
                     'extraction_mode': sample_meta.get('extraction_mode', 'fixed'),
                     'sampling_rate': sampling_rate,
@@ -442,6 +453,15 @@ class MetricsEvaluationCallback(L.Callback):
                     'predicted_classes': ','.join(map(str, pred_classes)),
                     'ground_truth': ','.join(map(str, gt_flat)),
                 }
+
+                if onset_preds is not None:
+                    onset_pred_flat = onset_preds[i].flatten()
+                    row['predicted_onsets'] = ','.join(f"{float(o):.4f}" for o in onset_pred_flat)
+
+                if onset_gt is not None:
+                    onset_gt_flat = onset_gt[i].flatten()
+                    row['ground_truth_onsets'] = ','.join(f"{float(o):.4f}" for o in onset_gt_flat)
+
                 csv_data.append(row)
 
         if csv_data:

@@ -68,6 +68,7 @@ model:
     classifier:
       num_heads: 8                   # Number of classification heads
       dropout: 0.2                   # Classifier dropout rate
+      predict_event_onset: false     # Predict spike onset in addition to presence
 
     reference_coordinates: "${reference_channels}"  # Path to channel coordinate file
 
@@ -247,6 +248,7 @@ data:
       estimated_spike_duration_s: 0.1         # Expected total spike duration (seconds)
       first_half_spike_duration: 0.05         # Duration before spike peak
       second_half_spike_duration: 0.05        # Duration after spike peak
+      predict_event_onset: false              # Predict spike onset in addition to presence
 
       # ----------------------------------------------------------------------
       # Signal Processing Pipeline
