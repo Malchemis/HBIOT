@@ -98,7 +98,7 @@ class MEGSpikeDetector(L.LightningModule):
         logger.info("Creating loss function")
         self.loss_fn = create_loss(loss_config)
         self.threshold = config["evaluation"].get("default_threshold", 0.5)
-        
+
         # Store optimizer and scheduler configs for later use
         self.optimizer_config = config["optimizer"]
         self.scheduler_config = config.get("scheduler", None)
@@ -176,8 +176,8 @@ class MEGSpikeDetector(L.LightningModule):
                 unknown_mask = kwargs['unknown_mask'].unsqueeze(1).repeat(1, n_windows, 1).view(batch_size * n_windows, n_channels)
                 kwargs['unknown_mask'] = unknown_mask  # [BxN_window, n_channels]
             kwargs['channel_mask'] = channel_mask
-            result = self.model(x, *args, **kwargs)  # [BxN_window, n_classes]
-            return result.view(batch_size, n_windows, -1)  # [batch_size, n_windows, n_classes]
+            result = self.model(x, *args, **kwargs)  # [B×N_window, n_classes]
+            return result.view(batch_size, n_windows, -1)  # [B, N_windows, n_classes]
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]) -> torch.Tensor:
         """Perform a single training step.
