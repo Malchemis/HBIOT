@@ -10,6 +10,8 @@ A PyTorch Lightning-based deep learning framework for detecting interictal epile
 - **Comprehensive Evaluation**: Relaxed metrics with temporal tolerance for realistic spike detection
 - **Configurable Pipeline**: YAML-based configuration with registry pattern for extensibility
 
+The full attention transformer with FlashAttention is imported from [x-transformers](https://github.com/lucidrains/x-transformers.git).
+
 ## Installation
 
 ```bash
