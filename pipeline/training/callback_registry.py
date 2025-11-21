@@ -6,53 +6,27 @@ metrics evaluation, model checkpointing, and comprehensive reporting capabilitie
 
 import os
 import logging
-from typing import Union, Dict, Type, Any, List, Optional, TYPE_CHECKING
+from typing import Union, Dict, Type, Any, List, Optional
 
 import torch
 import torch.nn as nn
 import lightning.pytorch as L
-
-# Type-checking imports - only used for type hints, not at runtime
-if TYPE_CHECKING:
-    from pipeline.eval.metrics import MetricsAggregator
-    from pipeline.training.lightning_module import MEGSpikeDetector
-    from pipeline.training.unsupervised_pretrain_lit_mod import MEGUnsupervisedPretrainer
-    from lightning.pytorch.callbacks import (
-        Callback,
-        ModelCheckpoint,
-        EarlyStopping,
-        LearningRateMonitor,
-        TQDMProgressBar,
-        RichProgressBar,
-        RichModelSummary,
-        ModelSummary,
-        StochasticWeightAveraging
-    )
+from pipeline.eval.metrics import MetricsAggregator
+from pipeline.training.lightning_module import MEGSpikeDetector
+from pipeline.training.unsupervised_pretrain_lit_mod import MEGUnsupervisedPretrainer
 
 logger = logging.getLogger(__name__)
-
-# Lazy imports for heavy dependencies - only load when actually creating callbacks
-# This saves ~126s on startup by deferring Lightning callback imports
-_callbacks_imported = False
-
-def _ensure_callbacks_imported():
-    """Lazy import Lightning callbacks only when needed."""
-    global _callbacks_imported
-    if not _callbacks_imported:
-        global Callback, ModelCheckpoint, EarlyStopping, LearningRateMonitor
-        global TQDMProgressBar, RichProgressBar, RichModelSummary, ModelSummary, StochasticWeightAveraging
-        from lightning.pytorch.callbacks import (
-            Callback,
-            ModelCheckpoint,
-            EarlyStopping,
-            LearningRateMonitor,
-            TQDMProgressBar,
-            RichProgressBar,
-            RichModelSummary,
-            ModelSummary,
-            StochasticWeightAveraging
-        )
-        _callbacks_imported = True
+from lightning.pytorch.callbacks import (
+    Callback,
+    ModelCheckpoint,
+    EarlyStopping,
+    LearningRateMonitor,
+    TQDMProgressBar,
+    RichProgressBar,
+    RichModelSummary,
+    ModelSummary,
+    StochasticWeightAveraging
+)
 
 try:
     from lightning import LightningModule
@@ -61,7 +35,6 @@ except ImportError:
     LightningModule = None
     LIGHTNING_AVAILABLE = False
 
-# These FSDP imports are kept as they're fast
 from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -126,13 +99,10 @@ class MetricsEvaluationCallback(L.Callback):
     def setup(
         self,
         trainer: L.Trainer,
-        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
+        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
         stage: str
     ) -> None:
         """Initialize metrics aggregator with settings from Lightning module's evaluation config."""
-        # Lazy import MetricsAggregator only when callback is actually used
-        from pipeline.eval.metrics import MetricsAggregator
-
         # Read evaluation config from Lightning module (single source of truth)
         self.metrics_config = pl_module.config.get("evaluation", {})
 
@@ -1830,60 +1800,42 @@ class ProjectionLayerCallback(L.Callback):
 
 
 # Dictionary mapping callback names to their classes
-# This registry is populated lazily to avoid importing all callbacks at module load time
-CALLBACK_REGISTRY: Dict[str, Type["Callback"]] = {}
-
-def _populate_callback_registry():
-    """Lazy populate callback registry only when needed."""
-    if CALLBACK_REGISTRY:
-        return  # Already populated
-
-    # Import Lightning callbacks
-    _ensure_callbacks_imported()
-
-    # Populate registry with Lightning callbacks
-    CALLBACK_REGISTRY.update({
-        "ModelCheckpoint": ModelCheckpoint,
-        "EarlyStopping": EarlyStopping,
-        "LearningRateMonitor": LearningRateMonitor,
-        "TQDMProgressBar": TQDMProgressBar,
-        "RichProgressBar": RichProgressBar,
-        "RichModelSummary": RichModelSummary,
-        "ModelSummary": ModelSummary,
-        "StochasticWeightAveraging": StochasticWeightAveraging,
-    })
-
-    # Add custom callbacks (already defined in this module, no import needed)
-    CALLBACK_REGISTRY.update({
-        "ProjectionLayerCallback": ProjectionLayerCallback,
-        "GradientNormLogger": GradientNormLogger,
-        "MetricsEvaluationCallback": MetricsEvaluationCallback,
-        "TemperatureScalingCallback": TemperatureScalingCallback,
-        "CalibrationDiagnosticCallback": CalibrationDiagnosticCallback,
-    })
+CALLBACK_REGISTRY: Dict[str, Type[Callback]] = {
+    "ModelCheckpoint": ModelCheckpoint,
+    "EarlyStopping": EarlyStopping,
+    "LearningRateMonitor": LearningRateMonitor,
+    "TQDMProgressBar": TQDMProgressBar,
+    "RichProgressBar": RichProgressBar,
+    "RichModelSummary": RichModelSummary,
+    "ProjectionLayerCallback": ProjectionLayerCallback,
+    "GradientNormLogger": GradientNormLogger,
+    "MetricsEvaluationCallback": MetricsEvaluationCallback,
+    "TemperatureScalingCallback": TemperatureScalingCallback,
+    "CalibrationDiagnosticCallback": CalibrationDiagnosticCallback,
+    "ModelSummary": ModelSummary,
+    "StochasticWeightAveraging": StochasticWeightAveraging,
+}
 
 
-def get_callback_class(callback_name: str) -> Type["Callback"]:
+def get_callback_class(callback_name: str) -> Type[Callback]:
     """Get callback class from registry by name.
-
+    
     Args:
         callback_name: Name of the callback
-
+        
     Returns:
         Callback class
-
+        
     Raises:
         ValueError: If the callback name is not found in the registry
     """
-    _populate_callback_registry()  # Lazy populate registry
-
     if callback_name not in CALLBACK_REGISTRY:
         raise ValueError(f"Callback '{callback_name}' not found in registry. Available callbacks: {list(CALLBACK_REGISTRY.keys())}")
-
+    
     return CALLBACK_REGISTRY[callback_name]
 
 
-def create_callback(callback_config: Dict[str, Any]) -> "Callback":
+def create_callback(callback_config: Dict[str, Any]) -> Callback:
     """Create a callback instance based on configuration.
     
     Args:
@@ -1909,7 +1861,7 @@ def create_callback(callback_config: Dict[str, Any]) -> "Callback":
     return callback_class(**callback_params)
 
 
-def create_callbacks(callbacks_config: List[Dict[str, Any]], log_dir: Union[str, None] = None) -> List["Callback"]:
+def create_callbacks(callbacks_config: List[Dict[str, Any]], log_dir: Union[str, None] = None) -> List[Callback]:
     """Create multiple callback instances based on configuration.
     
     Args:
@@ -1942,7 +1894,7 @@ def create_callbacks(callbacks_config: List[Dict[str, Any]], log_dir: Union[str,
     return callbacks
 
 
-def register_callback(name: str, callback_class: Type["Callback"]) -> None:
+def register_callback(name: str, callback_class: Type[Callback]) -> None:
     """Register a new callback in the registry.
     
     Args:
