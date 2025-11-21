@@ -988,17 +988,17 @@ class ChannelEmbeddingComposer(nn.Module):
                 k: v for k, v in fourier_cfg.items()
                 if k not in ('enabled', 'spatial_coordinates_path', 'channel_order')
             }
-            
+
             channel_order_path = fourier_cfg.get('channel_order')
             channel_loc_path = fourier_cfg.get('spatial_coordinates_path')
             with open(channel_order_path, 'rb') as f:
                 channel_order = pickle.load(f)
                 fourier_params['channel_order'] = channel_order
-            
-            with open(channel_loc_path, 'rb') as f:            
+
+            with open(channel_loc_path, 'rb') as f:
                 coordinates_dict = pickle.load(f)
                 fourier_params['coordinates_dict'] = coordinates_dict
-            
+
             self.fourier_module = FourierSpatialEmbedding(emb_size=emb_size, **fourier_params)
             self.strategies.append('fourier')
 
