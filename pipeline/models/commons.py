@@ -16,8 +16,27 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy import signal as scipy_signal
-from scipy import stats
+
+# Lazy imports for scipy - only loaded when feature extraction is actually used
+# This saves ~200+ seconds on startup when using models that don't need features
+_scipy_signal = None
+_scipy_stats = None
+
+def _get_scipy_signal():
+    """Lazy load scipy.signal only when needed."""
+    global _scipy_signal
+    if _scipy_signal is None:
+        from scipy import signal as scipy_signal
+        _scipy_signal = scipy_signal
+    return _scipy_signal
+
+def _get_scipy_stats():
+    """Lazy load scipy.stats only when needed."""
+    global _scipy_stats
+    if _scipy_stats is None:
+        from scipy import stats
+        _scipy_stats = stats
+    return _scipy_stats
 
 
 # ------ FEATURE EXTRACTION MODULES ------ #
@@ -358,6 +377,10 @@ class PatchFeatureEmbedding(nn.Module):
         Returns:
             Tensor of shape (batch_size, emb_size)
         """
+        # Lazy load scipy only when feature extraction is used
+        stats = _get_scipy_stats()
+        scipy_signal = _get_scipy_signal()
+
         batch_size = patch.shape[0]
         data = patch.detach().cpu().numpy()
 
@@ -365,7 +388,7 @@ class PatchFeatureEmbedding(nn.Module):
 
         for i in range(batch_size):
             x = data[i]
-            
+
             # === Morphological (13) ===
             morph = [
                 np.max(x),
