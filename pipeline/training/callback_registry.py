@@ -154,7 +154,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -166,7 +166,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_validation_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset validation outputs and metrics aggregator."""
         self.validation_outputs = []
@@ -176,7 +176,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_validation_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Compute and log validation metrics."""
         if not self.validation_outputs:
@@ -211,7 +211,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_test_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -223,7 +223,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_test_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset test outputs and metrics aggregator."""
         self.test_outputs = []
@@ -237,7 +237,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_test_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Compute test metrics, generate reports, and save results."""
         if not self.test_outputs:
@@ -403,7 +403,7 @@ class MetricsEvaluationCallback(L.Callback):
     def _save_predictions_csv(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Save test predictions to CSV file.
         This includes metadata and formatted predictions for each sample.
@@ -667,7 +667,7 @@ class GradientNormLogger(L.Callback):
     def on_before_optimizer_step(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         optimizer: torch.optim.Optimizer
     ) -> None:
         """Compute gradient norm once, apply adaptive clipping, and log all metrics.
@@ -720,7 +720,7 @@ class GradientNormLogger(L.Callback):
 
     def _apply_adaptive_clipping(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         grad_norm: float
     ) -> tuple[bool, float, Optional[float], Optional[float], bool]:
         """Apply adaptive gradient clipping (integrated ZClip functionality).
@@ -850,7 +850,7 @@ class GradientNormLogger(L.Callback):
 
     def _apply_in_place_clipping(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         grad_norm: float,
         max_norm: float
     ) -> None:
@@ -870,7 +870,7 @@ class GradientNormLogger(L.Callback):
 
     def _apply_max_norm_clipping(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         grad_norm: float,
         max_norm: float
     ) -> None:
@@ -903,7 +903,7 @@ class GradientNormLogger(L.Callback):
 
     def _log_all_gradient_metrics(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         trainer: L.Trainer,
         pre_clip_norm: float,
         post_clip_norm: float,
@@ -1136,7 +1136,7 @@ class GradientNormLogger(L.Callback):
 
     def _log_gradient_distributions(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         trainer: L.Trainer
     ) -> None:
         """Log gradient distribution statistics (histograms, percentiles, sparsity).
@@ -1258,7 +1258,7 @@ class TemperatureScalingCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -1280,7 +1280,7 @@ class TemperatureScalingCallback(L.Callback):
     def on_validation_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset validation outputs at the start of each validation epoch."""
         self.validation_outputs = []
@@ -1288,7 +1288,7 @@ class TemperatureScalingCallback(L.Callback):
     def on_validation_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Optimize temperature on validation set at the end of validation epoch."""
         if not self.enabled:
@@ -1436,7 +1436,7 @@ class CalibrationDiagnosticCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -1452,7 +1452,7 @@ class CalibrationDiagnosticCallback(L.Callback):
     def on_validation_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset outputs at epoch start."""
         self.validation_outputs = []
@@ -1460,7 +1460,7 @@ class CalibrationDiagnosticCallback(L.Callback):
     def on_validation_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Compute and log calibration metrics at epoch end."""
         # Only log every N epochs
@@ -1743,7 +1743,7 @@ class ProjectionLayerCallback(L.Callback):
         self.frozen = False
         self.logger = logging.getLogger(__name__)
 
-    def setup(self, trainer: L.Trainer, pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer], stage: str) -> None:
+    def setup(self, trainer: L.Trainer, pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"], stage: str) -> None:
         """Set up the callback at the start of training.
 
         Args:
@@ -1754,7 +1754,7 @@ class ProjectionLayerCallback(L.Callback):
         self.logger.info(f"Projection layer callback setup with freeze_after_epochs={self.freeze_after_epochs}, "
                          f"freeze_on_plateau={self.freeze_on_plateau}, patience={self.patience}")
 
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer], stage: str) -> None:
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"], stage: str) -> None:
         """Check whether to freeze the projection layer at the end of each epoch.
 
         Args:
@@ -1786,7 +1786,7 @@ class ProjectionLayerCallback(L.Callback):
                 self.logger.info(f"Validation metric {self.monitor} plateaued for {self.patience} epochs.")
                 self._freeze_projection(pl_module)
 
-    def _freeze_projection(self, pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]) -> None:
+    def _freeze_projection(self, pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]) -> None:
         """Freeze the projection layer in the model.
 
         Args:

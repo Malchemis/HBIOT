@@ -82,7 +82,6 @@ def setup_ddp_strategy(find_unused_parameters: bool = True):
     Returns:
         DDPStrategy instance if multiple GPUs available, None otherwise.
     """
-    import torch
     logger = logging.getLogger(__name__)
     strategy = None
 
