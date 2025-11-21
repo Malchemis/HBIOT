@@ -159,8 +159,8 @@ def save_preprocessed_recording(
             'meg_data',
             data=meg_data,
             dtype=np.float32,
-            compression='gzip',
-            compression_opts=4,
+            # compression='gzip',
+            # compression_opts=4,
         )
 
         f.create_dataset(
