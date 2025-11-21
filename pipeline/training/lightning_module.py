@@ -97,6 +97,7 @@ class MEGSpikeDetector(L.LightningModule):
         loss_config = config["loss"]
         logger.info("Creating loss function")
         self.loss_fn = create_loss(loss_config)
+        self.threshold = config["evaluation"].get("default_threshold", 0.5)
         
         # Store optimizer and scheduler configs for later use
         self.optimizer_config = config["optimizer"]

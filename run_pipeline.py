@@ -25,7 +25,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from pipeline.utils.config_handler import load_config
 from pipeline.data.datamodule_registry import create_datamodule
 from pipeline.training.lightning_module import MEGSpikeDetector
-from pipeline.training.callback_registry import create_callbacks, MetricsEvaluationCallback
+from pipeline.training.callback_registry import create_callbacks
 
 
 def setup_logging(log_level: str = "INFO", log_file: str = "pipeline.log") -> logging.Logger:
