@@ -284,6 +284,11 @@ class MEGSpikeDetector(L.LightningModule):
         # Forward pass with batch-aware channel mask
         logits = self.forward(X, channel_mask=channel_mask, window_mask=window_mask)
 
+        # Compute loss to populate history for per-window loss tracking
+        test_loss = self.loss_fn(logits, y, mask=window_mask)
+        batch_size = X.shape[0]
+        self.log("test_loss", test_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=batch_size)
+
         # Return outputs for callback collection
         return self._collect_batch_outputs(batch, logits)
 
