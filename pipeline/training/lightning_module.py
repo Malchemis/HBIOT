@@ -170,13 +170,13 @@ class MEGSpikeDetector(L.LightningModule):
             return torch.cat(window_outputs, dim=1)  # [batch_size, n_windows, n_classes]
         else:
             # Batch mode: Reshape to process all windows simultaneously
-            x = x.view(batch_size * n_windows, n_channels, n_timepoints)  # [B×N_window, n_channels, n_timepoints]
-            channel_mask = channel_mask.unsqueeze(1).repeat(1, n_windows, 1).view(batch_size * n_windows, n_channels) if channel_mask is not None else None  # [B×N_window, n_channels]
+            x = x.view(batch_size * n_windows, n_channels, n_timepoints)  # [BxN_window, n_channels, n_timepoints]
+            channel_mask = channel_mask.unsqueeze(1).repeat(1, n_windows, 1).view(batch_size * n_windows, n_channels) if channel_mask is not None else None  # [BxN_window, n_channels]
             if 'unknown_mask' in kwargs and kwargs['unknown_mask'] is not None:
                 unknown_mask = kwargs['unknown_mask'].unsqueeze(1).repeat(1, n_windows, 1).view(batch_size * n_windows, n_channels)
-                kwargs['unknown_mask'] = unknown_mask  # [B×N_window, n_channels]
+                kwargs['unknown_mask'] = unknown_mask  # [BxN_window, n_channels]
             kwargs['channel_mask'] = channel_mask
-            result = self.model(x, *args, **kwargs)  # [B×N_window, n_classes]
+            result = self.model(x, *args, **kwargs)  # [BxN_window, n_classes]
             return result.view(batch_size, n_windows, -1)  # [batch_size, n_windows, n_classes]
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]) -> torch.Tensor:

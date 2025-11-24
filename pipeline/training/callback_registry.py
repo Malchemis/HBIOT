@@ -577,7 +577,7 @@ class GradientNormLogger(L.Callback):
             clip_eps: Small constant to avoid division by zero (default: 1e-6)
             clip_warmup_steps: Number of steps to collect gradients before enabling clipping (default: 25)
             clip_mode: Clipping mode - "zscore" or "percentile" (default: "zscore")
-                      - "percentile": Always clip to mean + (z_thresh × std)
+                      - "percentile": Always clip to mean + (z_thresh x std)
                       - "zscore": Use z-score based adaptive clipping
             clip_option: Strategy for zscore mode - "adaptive_scaling" or "mean" (default: "adaptive_scaling")
                         - "adaptive_scaling": Adaptive threshold based on outlier magnitude
@@ -793,7 +793,7 @@ class GradientNormLogger(L.Callback):
         assert self.clip_mean is not None
 
         if self.clip_mode == "percentile":
-            # Percentile mode: always use fixed threshold = mean + (z_thresh × std)
+            # Percentile mode: always use fixed threshold = mean + (z_thresh x std)
             threshold = self.clip_mean + self.clip_z_thresh * std
             if grad_norm > threshold:
                 return threshold

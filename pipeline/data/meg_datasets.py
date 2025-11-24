@@ -553,7 +553,7 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
             self.chunks_per_recording = [self.samples_per_recording for _ in self.recordings]
             self.cumulative_chunks = np.cumsum([0] + self.chunks_per_recording)
 
-            self.logger.info(f"Train dataset size: {len(self)} chunks ({len(self.recordings)} recordings × "
+            self.logger.info(f"Train dataset size: {len(self)} chunks ({len(self.recordings)} recordings x "
                            f"{self.samples_per_recording} random samples)")
 
     def __len__(self) -> int:
