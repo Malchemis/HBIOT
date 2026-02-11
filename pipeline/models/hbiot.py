@@ -8,6 +8,7 @@ from linear_attention_transformer import LinearAttentionTransformer
 
 from pipeline.models.full_attention_transformer import FullAttentionTransformer
 from pipeline.models.biot import BIOTEncoder
+from pipeline.models.commons import SpectralChannelEmbedding
 
 
 def log_tensor_statistics(tensor: torch.Tensor, name: str, logger_obj: Optional[logging.Logger] = None) -> None:
@@ -108,6 +109,7 @@ class BIOTHierarchicalClassifier(nn.Module):
             n_classes: int = 1,
             reference_coordinates: Dict[str, List[float]] = {},
             max_virtual_batch_size: int = 640,
+            spectral_channel_embedding: Optional[dict] = None,
             **kwargs
     ):
         """Initialize the BIOT hierarchical encoder.
@@ -132,6 +134,9 @@ class BIOTHierarchicalClassifier(nn.Module):
             reference_coordinates: Dictionary mapping channel names to their spatial coordinates.
             max_virtual_batch_size: Maximum virtual batch size (BxN) to process in a single forward pass. Defaults to 640 = 32x20 (tested empirically on h100 with 80GB RAM).
                 When BxN exceeds this value, processing is done in chunks. Default: 640.
+            spectral_channel_embedding: Optional dict with config for SpectralChannelEmbedding.
+                Keys: enabled, n_eigenvectors, projection_type, siren_hidden_dim, siren_n_layers,
+                siren_w0_initial, siren_w0, eigen_eps.
             **kwargs: Additional keyword arguments for flexibility.
         """
         super().__init__()
@@ -235,6 +240,15 @@ class BIOTHierarchicalClassifier(nn.Module):
             from pipeline.models.commons import ClassificationHead
             self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes)
 
+        # Optional spectral channel embedding (data-driven from functional connectivity)
+        self.spectral_channel_embedding_module = None
+        if spectral_channel_embedding is not None and spectral_channel_embedding.get("enabled", False):
+            sce_cfg = {k: v for k, v in spectral_channel_embedding.items() if k != "enabled"}
+            self.spectral_channel_embedding_module = SpectralChannelEmbedding(
+                emb_size=emb_size, **sce_cfg
+            )
+            self.logger.info(f"SpectralChannelEmbedding enabled with config: {sce_cfg}")
+
     def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None, window_mask: Optional[torch.Tensor] = None, unk_augment: float = 0.0, unknown_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass of the BIOT hierarchical encoder with detailed shape tracking.
 
@@ -306,11 +320,22 @@ class BIOTHierarchicalClassifier(nn.Module):
             unknown_mask_reshaped = unknown_mask_reshaped.view(virtual_batch_size, n_channels)
             # Shape: (B, N, C) → (BxN, C)
 
+        # Compute spectral channel embeddings from concatenated windows (if enabled)
+        spectral_embs_expanded = None
+        if self.spectral_channel_embedding_module is not None:
+            # Concatenate all windows per sample: (B, N, C, T) → (B, C, N*T) for robust PLV
+            x_concat = x.transpose(1, 2).reshape(batch_size, n_channels, n_windows * n_samples)
+            spectral_embs = self.spectral_channel_embedding_module(x_concat, channel_mask)  # (B, C, E)
+            # Expand for virtual batch: (B, C, E) → (B, 1, C, E) → (B, N, C, E) → (B*N, C, E)
+            spectral_embs_expanded = spectral_embs.unsqueeze(1).expand(-1, n_windows, -1, -1)
+            spectral_embs_expanded = spectral_embs_expanded.reshape(virtual_batch_size, n_channels, -1)
+            log_tensor_statistics(spectral_embs_expanded, "HBIOT spectral channel embeddings (expanded)", self.logger)
+
         # Process windows through BIOT encoder with optional chunking for large virtual batches
         if virtual_batch_size <= self.max_virtual_batch_size:
             # Fast path: single forward pass for all windows
             self.logger.debug(f"HBIOT processing virtual_batch_size={virtual_batch_size} in single pass")
-            window_tokens = self.window_encoder(x_reshaped, channel_mask_reshaped, unk_augment=unk_augment, unknown_mask=unknown_mask_reshaped)
+            window_tokens = self.window_encoder(x_reshaped, channel_mask_reshaped, unk_augment=unk_augment, unknown_mask=unknown_mask_reshaped, spectral_channel_embs=spectral_embs_expanded)
             # Shape: (BxN, Nch, Ns) → (BxN, n_tokens_per_window, emb_size)
         else:
             # Slow path: chunk processing when virtual batch exceeds maximum
@@ -323,9 +348,10 @@ class BIOTHierarchicalClassifier(nn.Module):
                 # Extract chunk
                 chunk_x = x_reshaped[chunk_start:chunk_end]
                 chunk_mask = channel_mask_reshaped[chunk_start:chunk_end] if channel_mask_reshaped is not None else None
+                chunk_spectral = spectral_embs_expanded[chunk_start:chunk_end] if spectral_embs_expanded is not None else None
 
                 # Process chunk through encoder
-                chunk_tokens = self.window_encoder(chunk_x, chunk_mask, unk_augment=unk_augment, unknown_mask=unknown_mask)
+                chunk_tokens = self.window_encoder(chunk_x, chunk_mask, unk_augment=unk_augment, unknown_mask=unknown_mask, spectral_channel_embs=chunk_spectral)
                 chunks.append(chunk_tokens)
 
             # Concatenate all chunks

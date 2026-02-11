@@ -371,7 +371,7 @@ class BIOTEncoder(nn.Module):
         self.missing_channel_embedding = nn.Parameter(torch.randn(1, emb_size)) 
         self.training = True
 
-    def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor], unk_augment: float = 0.0, unknown_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor], unk_augment: float = 0.0, unknown_mask: Optional[torch.Tensor] = None, spectral_channel_embs: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass with detailed multi-stage processing and shape tracking.
 
         DATA FLOW:
@@ -466,7 +466,11 @@ class BIOTEncoder(nn.Module):
         ## Add channel identity embeddings
         # Initialize base channel embeddings for all channels
         channel_embs = self.channel_embedding.unsqueeze(0).expand(batch_size, -1, -1)  # (BxN, C, E)
-        
+
+        # Add data-driven spectral channel embeddings (from functional connectivity)
+        if spectral_channel_embs is not None:
+            channel_embs = channel_embs + spectral_channel_embs  # (BxN, C, E)
+
         if channel_mask is None:
             channel_mask = torch.ones((batch_size, n_channels), dtype=torch.bool, device=x.device)
 

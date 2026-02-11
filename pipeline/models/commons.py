@@ -11,14 +11,13 @@ These components are used across different model architectures (BIOT, HBIOT, etc
 
 import logging
 import math
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 from scipy import signal as scipy_signal
 from scipy import stats
-
 
 # ------ FEATURE EXTRACTION MODULES ------ #
 # Frequency and time domain feature extraction modules for MEG data.
@@ -518,6 +517,249 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1)]  # type: ignore
         return self.dropout(x)
 
+
+class SirenLayer(nn.Module):
+    """Single SIREN layer: sin(w0 * (Wx + b)) with principled initialization.
+
+    Ref: Sitzmann et al., "Implicit Neural Representations with Periodic Activation Functions", NeurIPS 2020.
+    """
+
+    def __init__(self, dim_in: int, dim_out: int, w0: float = 1.0, is_first: bool = False, w0_initial: float = 30.0,
+                 c: float = 6.0):
+        super().__init__()
+        self.w0 = w0_initial if is_first else w0
+        self.linear = nn.Linear(dim_in, dim_out)
+
+        # Principled initialization
+        with torch.no_grad():
+            if is_first:
+                bound = 1.0 / dim_in
+            else:
+                bound = math.sqrt(c / dim_in) / self.w0
+            self.linear.weight.uniform_(-bound, bound)
+            self.linear.bias.uniform_(-bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sin(self.w0 * self.linear(x))
+
+
+class SirenNet(nn.Module):
+    """Stack of SirenLayers with a final linear output (no sine on last layer)."""
+
+    def __init__(self, dim_in: int, dim_hidden: int, dim_out: int, n_layers: int = 3,
+                 w0_initial: float = 30.0, w0: float = 1.0, c: float = 6.0):
+        super().__init__()
+        layers = []
+        for i in range(n_layers):
+            is_first = (i == 0)
+            layer_in = dim_in if is_first else dim_hidden
+            layers.append(SirenLayer(layer_in, dim_hidden, w0=w0, is_first=is_first, w0_initial=w0_initial))
+        self.net = nn.Sequential(*layers)
+
+        # Final linear projection (no sine activation)
+        self.final_linear = nn.Linear(dim_hidden, dim_out)
+        with torch.no_grad():
+            bound = math.sqrt(c / dim_hidden) / w0
+            self.final_linear.weight.uniform_(-bound, bound)
+            self.final_linear.bias.uniform_(-bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.final_linear(self.net(x))
+
+
+def _hilbert_torch(x: torch.Tensor) -> torch.Tensor:
+    """Compute the analytic signal via FFT-based Hilbert transform.
+
+    Args:
+        x: Real-valued input tensor of shape (..., T).
+
+    Returns:
+        Complex-valued analytic signal of shape (..., T).
+    """
+    T = x.shape[-1]
+    X = torch.fft.fft(x, dim=-1)
+
+    # Build step function: h[0]=1, h[1..N/2-1]=2, h[N/2]=1 (if even), h[N/2+1..]=0
+    h = torch.zeros(T, device=x.device, dtype=x.dtype)
+    h[0] = 1.0
+    if T % 2 == 0:
+        h[1:T // 2] = 2.0
+        h[T // 2] = 1.0
+    else:
+        h[1:(T + 1) // 2] = 2.0
+
+    return torch.fft.ifft(X * h, dim=-1)
+
+
+def compute_plv_gpu(x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Compute Phase Locking Value (PLV) connectivity matrix on GPU via bmm.
+
+    Memory-efficient: uses bmm on (B, C, T) complex phase vectors rather than
+    materializing the full (B, C, C, T) tensor.
+
+    Args:
+        x: Input tensor of shape (B, C, T) — real-valued time series.
+        channel_mask: Optional mask (B, C), True=valid, False=masked.
+
+    Returns:
+        PLV adjacency matrix of shape (B, C, C), values in [0, 1].
+    """
+    B, C, T = x.shape
+
+    # Analytic signal → instantaneous phase → unit complex phasor
+    analytic = _hilbert_torch(x)  # (B, C, T) complex
+    phase = torch.angle(analytic)  # (B, C, T) real
+    exp_phase = torch.exp(1j * phase.to(torch.float32))  # (B, C, T) complex64
+
+    # PLV = |<e^{j(phi_i - phi_j)}>_t| = |sum_t e^{j*phi_i} * e^{-j*phi_j}| / T
+    plv = torch.abs(torch.bmm(exp_phase, exp_phase.conj().transpose(1, 2))) / T  # (B, C, C)
+
+    # Zero out rows/columns for masked channels
+    if channel_mask is not None:
+        mask_2d = channel_mask.unsqueeze(2) & channel_mask.unsqueeze(1)  # (B, C, C)
+        plv = plv * mask_2d.float()
+
+    return plv
+
+
+def compute_spectral_coords(
+    adjacency: torch.Tensor,
+    n_eigenvectors: int,
+    channel_mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Compute spectral coordinates from a graph adjacency matrix.
+
+    Builds the normalized graph Laplacian L = I - D^{-1/2} A D^{-1/2},
+    performs eigendecomposition, and returns the bottom-k non-trivial eigenvectors
+    as spectral coordinates for each node.
+
+    Args:
+        adjacency: Adjacency matrix (B, C, C), non-negative.
+        n_eigenvectors: Number of spectral coordinates (k).
+        channel_mask: Optional mask (B, C), True=valid.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Spectral coordinates of shape (B, C, k).
+    """
+    B, C, _ = adjacency.shape
+    device = adjacency.device
+
+    # Degree matrix
+    degree = adjacency.sum(dim=-1)  # (B, C)
+
+    # D^{-1/2}, safe for zero-degree nodes
+    d_inv_sqrt = torch.zeros_like(degree)
+    valid = degree > eps
+    d_inv_sqrt[valid] = degree[valid].rsqrt()  # 1/sqrt(d)
+
+    # Normalized Laplacian: L = I - D^{-1/2} A D^{-1/2}
+    # D^{-1/2} A D^{-1/2} = diag(d_inv_sqrt) @ A @ diag(d_inv_sqrt)
+    d_left = d_inv_sqrt.unsqueeze(2)   # (B, C, 1)
+    d_right = d_inv_sqrt.unsqueeze(1)  # (B, 1, C)
+    norm_adj = d_left * adjacency * d_right  # (B, C, C)
+    laplacian = torch.eye(C, device=device).unsqueeze(0).expand(B, -1, -1) - norm_adj  # (B, C, C)
+
+    # Eigendecomposition (detached — eigh gradients are numerically unstable)
+    with torch.no_grad():
+        eigenvalues, eigenvectors = torch.linalg.eigh(laplacian)  # sorted ascending
+        # eigenvalues: (B, C), eigenvectors: (B, C, C)
+
+    # Take eigenvectors 1..k+1 (skip index 0 = trivial constant eigenvector)
+    k = min(n_eigenvectors, C - 1)
+    coords = eigenvectors[:, :, 1:k + 1].clone()  # (B, C, k)
+
+    # Pad with zeros if fewer valid channels than k
+    if k < n_eigenvectors:
+        pad = torch.zeros(B, C, n_eigenvectors - k, device=device, dtype=coords.dtype)
+        coords = torch.cat([coords, pad], dim=-1)  # (B, C, n_eigenvectors)
+
+    # Sign ambiguity fix: max-abs-positive convention per eigenvector
+    # For each eigenvector, find the element with the largest absolute value and
+    # flip the sign so that element is positive.
+    max_abs_idx = coords.abs().argmax(dim=1, keepdim=True)  # (B, 1, k)
+    signs = torch.gather(coords, 1, max_abs_idx).sign()  # (B, 1, k)
+    signs[signs == 0] = 1.0
+    coords = coords * signs  # (B, C, k)
+
+    # Zero out masked channels
+    if channel_mask is not None:
+        coords = coords * channel_mask.unsqueeze(-1).float()  # (B, C, k)
+
+    return coords
+
+
+class SpectralChannelEmbedding(nn.Module):
+    """Derive channel embeddings from functional connectivity graph structure.
+
+    Computes PLV-based connectivity on GPU, extracts spectral coordinates
+    (graph Laplacian eigenvectors), and maps them to embedding space through
+    a SIREN network.
+
+    Pipeline:
+        Input (B, C, T) → PLV (B, C, C) → Laplacian eigenvectors (B, C, k) → SIREN → (B, C, E)
+    """
+
+    def __init__(
+        self,
+        emb_size: int = 256,
+        n_eigenvectors: int = 16,
+        projection_type: str = "siren",
+        siren_hidden_dim: int = 128,
+        siren_n_layers: int = 3,
+        siren_w0_initial: float = 30.0,
+        siren_w0: float = 1.0,
+        eigen_eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.n_eigenvectors = n_eigenvectors
+        self.eigen_eps = eigen_eps
+        self.logger = logging.getLogger(__name__ + ".SpectralChannelEmbedding")
+
+        if projection_type == "siren":
+            self.projection = SirenNet(
+                dim_in=n_eigenvectors,
+                dim_hidden=siren_hidden_dim,
+                dim_out=emb_size,
+                n_layers=siren_n_layers,
+                w0_initial=siren_w0_initial,
+                w0=siren_w0,
+            )
+        elif projection_type == "linear":
+            self.projection = nn.Linear(n_eigenvectors, emb_size)
+        else:
+            raise ValueError(f"projection_type must be 'siren' or 'linear', got '{projection_type}'")
+
+        self.logger.info(
+            f"Initialized SpectralChannelEmbedding: n_eigenvectors={n_eigenvectors}, "
+            f"projection={projection_type}, emb_size={emb_size}"
+        )
+
+    @torch.amp.custom_fwd(device_type='cuda', cast_inputs=torch.float32)
+    def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute spectral channel embeddings from raw signal.
+
+        Args:
+            x: Input tensor (B, C, T) — concatenated windows for robust PLV.
+            channel_mask: Optional mask (B, C), True=valid.
+
+        Returns:
+            Spectral embeddings of shape (B, C, emb_size).
+        """
+        # Force float32 for complex FFT and eigendecomposition
+        x = x.float()
+
+        # 1. PLV connectivity
+        plv = compute_plv_gpu(x, channel_mask)  # (B, C, C)
+
+        # 2. Spectral coordinates
+        coords = compute_spectral_coords(plv, self.n_eigenvectors, channel_mask, self.eigen_eps)  # (B, C, k)
+
+        # 3. Project to embedding space
+        emb = self.projection(coords)  # (B, C, emb_size)
+
+        return emb
 
 class ClassificationHead(nn.Sequential):
     """Module for classification head.
