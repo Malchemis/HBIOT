@@ -12,7 +12,7 @@ import logging
 import random
 import numpy as np
 import torch
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
 torch.set_float32_matmul_precision('high')
 import argparse
 import lightning as L
