@@ -72,6 +72,16 @@ model:
 
     reference_coordinates: "${reference_channels}"  # Path to channel coordinate file
 
+    spectral_channel_embedding:
+      enabled: false                    # Disabled by default, opt-in
+      n_eigenvectors: 16
+      projection_type: "siren"          # "siren" or "linear"
+      siren_hidden_dim: 128
+      siren_n_layers: 3
+      siren_w0_initial: 30.0
+      siren_w0: 1.0
+      eigen_eps: 1.0e-6
+
   # BIOT: Single-stage transformer (simpler, faster)
   BIOT:
     emb_size: 256
