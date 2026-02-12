@@ -592,7 +592,7 @@ class AttentionClassificationHead(nn.Module):
             logits = logits.view(batch_size, n_windows, -1)
 
             # For binary classification (n_classes=1), squeeze last dimension to get (B, N)
-            if self.n_classes == 1:
+            if self.n_classes == 1 and not self.predict_event_onset:
                 logits = logits.squeeze(-1)
 
             log_tensor_statistics(logits, "AttentionClassificationHead output (single token)", logger)

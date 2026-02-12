@@ -99,6 +99,9 @@ class MEGSpikeDetector(L.LightningModule):
         self.loss_fn = create_loss(loss_config)
         self.threshold = config["evaluation"].get("default_threshold", 0.5)
 
+        # Temperature parameter for calibration (optimized by TemperatureScalingCallback)
+        self.temperature = nn.Parameter(torch.ones(1))
+
         # Store optimizer and scheduler configs for later use
         self.optimizer_config = config["optimizer"]
         self.scheduler_config = config.get("scheduler", None)
@@ -177,7 +180,10 @@ class MEGSpikeDetector(L.LightningModule):
                 kwargs['unknown_mask'] = unknown_mask  # [BxN_window, n_channels]
             kwargs['channel_mask'] = channel_mask
             result = self.model(x, *args, **kwargs)  # [B×N_window, n_classes]
-            return result.view(batch_size, n_windows, -1)  # [B, N_windows, n_classes]
+            result = result.view(batch_size, n_windows, -1)  # [B, N_windows, n_classes]
+            if result.size(-1) == 1:
+                result = result.squeeze(-1)  # [B, N_windows] for single-class non-onset
+            return result
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]) -> torch.Tensor:
         """Perform a single training step.
