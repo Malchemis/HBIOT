@@ -1,3 +1,0 @@
-from pipeline.optim.loss_registry import create_loss
-from pipeline.optim.optimizer_registry import create_optimizer
-from pipeline.optim.scheduler_registry import create_scheduler
