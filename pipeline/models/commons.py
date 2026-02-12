@@ -11,7 +11,8 @@ These components are used across different model architectures (BIOT, HBIOT, etc
 
 import logging
 import math
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -694,11 +695,17 @@ class SpectralChannelEmbedding(nn.Module):
     """Derive channel embeddings from functional connectivity graph structure.
 
     Computes PLV-based connectivity on GPU, extracts spectral coordinates
-    (graph Laplacian eigenvectors), and maps them to embedding space through
-    a SIREN network.
+    (graph Laplacian eigenvectors), rescales them following the generalised INR
+    framework, and maps them to embedding space through a SIREN network.
+
+    The √n rescaling follows Grattarola & Vandergheynst (NeurIPS 2022): generalised
+    spectral embeddings e_i = √n · [u_{1,i}, ..., u_{k,i}] ensure scale invariance
+    across graphs of different sizes, so similar nodes have comparable embeddings
+    regardless of the number of channels.
 
     Pipeline:
-        Input (B, C, T) → PLV (B, C, C) → Laplacian eigenvectors (B, C, k) → SIREN → (B, C, E)
+        Input (B, C, T) → PLV (B, C, C) → Laplacian eigenvectors (B, C, k)
+        → √n rescale → [augmentation] → SIREN → LayerNorm → (B, C, E)
     """
 
     def __init__(
@@ -711,10 +718,15 @@ class SpectralChannelEmbedding(nn.Module):
         siren_w0_initial: float = 30.0,
         siren_w0: float = 1.0,
         eigen_eps: float = 1e-6,
+        sqrt_n_rescale: bool = True,
+        output_norm: bool = True,
+        augmentation_noise_std: float = 0.0,
     ):
         super().__init__()
         self.n_eigenvectors = n_eigenvectors
         self.eigen_eps = eigen_eps
+        self.sqrt_n_rescale = sqrt_n_rescale
+        self.augmentation_noise_std = augmentation_noise_std
         self.logger = logging.getLogger(__name__ + ".SpectralChannelEmbedding")
 
         if projection_type == "siren":
@@ -731,9 +743,14 @@ class SpectralChannelEmbedding(nn.Module):
         else:
             raise ValueError(f"projection_type must be 'siren' or 'linear', got '{projection_type}'")
 
+        # Output normalization (stabilizes embedding scale across batches)
+        self.output_norm = nn.LayerNorm(emb_size) if output_norm else nn.Identity()
+
         self.logger.info(
             f"Initialized SpectralChannelEmbedding: n_eigenvectors={n_eigenvectors}, "
-            f"projection={projection_type}, emb_size={emb_size}"
+            f"projection={projection_type}, emb_size={emb_size}, "
+            f"sqrt_n_rescale={sqrt_n_rescale}, output_norm={output_norm}, "
+            f"augmentation_noise_std={augmentation_noise_std}"
         )
 
     @torch.amp.custom_fwd(device_type='cuda', cast_inputs=torch.float32)
@@ -756,10 +773,324 @@ class SpectralChannelEmbedding(nn.Module):
         # 2. Spectral coordinates
         coords = compute_spectral_coords(plv, self.n_eigenvectors, channel_mask, self.eigen_eps)  # (B, C, k)
 
-        # 3. Project to embedding space
-        emb = self.projection(coords)  # (B, C, emb_size)
+        # 3. GINR √n rescaling: e_i = √n · [u_{1,i}, ..., u_{k,i}]
+        # Ensures scale invariance across different channel counts
+        if self.sqrt_n_rescale:
+            if channel_mask is not None:
+                n_valid = channel_mask.sum(dim=1, keepdim=True).unsqueeze(-1).float().clamp(min=1)  # (B, 1, 1)
+            else:
+                n_valid = torch.tensor(x.shape[1], device=x.device, dtype=torch.float32)
+            coords = coords * torch.sqrt(n_valid)
+
+        # 4. Augmentation: Gaussian noise on spectral coordinates during training
+        if self.training and self.augmentation_noise_std > 0:
+            noise = torch.randn_like(coords) * self.augmentation_noise_std
+            if channel_mask is not None:
+                noise = noise * channel_mask.unsqueeze(-1).float()
+            coords = coords + noise
+
+        # 5. Project to embedding space + normalize
+        emb = self.output_norm(self.projection(coords))  # (B, C, emb_size)
 
         return emb
+
+
+class FourierSpatialEmbedding(nn.Module):
+    """REVE-style Fourier positional encoding from 3D sensor coordinates.
+
+    Encodes each channel's 3D spatial position into an embedding vector using:
+    1. Deterministic Fourier encoding: sin/cos at multiple frequencies per dimension
+    2. Parallel learnable linear projection
+    3. LayerNorm on the sum
+
+    Pipeline:
+        coordinates (C, 3) → Fourier PE (C, D_fourier) → Linear → (C, E)
+                           ↘ Linear(3, E) ↗
+                             → sum → LayerNorm → (C, E)
+
+    Reference: El Ouahidi et al., "REVE: A Foundation Model for EEG", NeurIPS 2025.
+    """
+
+    def __init__(
+        self,
+        emb_size: int = 256,
+        n_frequencies: int = 8,
+        coordinate_dim: int = 3,
+        learnable_linear: bool = True,
+        augmentation_noise_std: float = 0.0,
+    ):
+        super().__init__()
+        self.n_frequencies = n_frequencies
+        self.coordinate_dim = coordinate_dim
+        self.augmentation_noise_std = augmentation_noise_std
+        self.logger = logging.getLogger(__name__ + ".FourierSpatialEmbedding")
+
+        # Fourier PE dimension: sin + cos for each frequency for each coordinate dim
+        n_fourier_features = 2 * n_frequencies * coordinate_dim
+
+        # Projection from Fourier features to embedding space
+        self.fourier_proj = nn.Linear(n_fourier_features, emb_size)
+
+        # Parallel learnable linear path (REVE: compensates for Fourier truncation)
+        self.learnable_linear = learnable_linear
+        if learnable_linear:
+            self.linear_proj = nn.Sequential(
+                nn.Linear(coordinate_dim, emb_size),
+                nn.GELU(),
+            )
+
+        # Output normalization
+        self.output_norm = nn.LayerNorm(emb_size)
+
+        # Frequency bands: 2^0*π, 2^1*π, ..., 2^(n_freq-1)*π
+        freq_bands = (2.0 ** torch.arange(n_frequencies).float()) * math.pi
+        self.register_buffer('freq_bands', freq_bands)
+
+        # Coordinate buffer — set via set_coordinates()
+        self.register_buffer('coordinates', torch.empty(0))
+
+        self.logger.info(
+            f"Initialized FourierSpatialEmbedding: n_frequencies={n_frequencies}, "
+            f"coord_dim={coordinate_dim}, emb_size={emb_size}, "
+            f"learnable_linear={learnable_linear}, "
+            f"augmentation_noise_std={augmentation_noise_std}"
+        )
+
+    def set_coordinates(
+        self,
+        coordinates_dict: Dict[str, List[float]],
+        channel_order: List[str],
+    ) -> None:
+        """Set the 3D coordinates tensor from a dictionary.
+
+        Args:
+            coordinates_dict: Mapping from channel name to [x, y, z] coordinates.
+            channel_order: Ordered list of channel names (defines index mapping).
+        """
+        C = len(channel_order)
+        coords = torch.zeros(C, self.coordinate_dim)
+        n_found = 0
+        for i, ch_name in enumerate(channel_order):
+            if ch_name in coordinates_dict:
+                coord_vals = coordinates_dict[ch_name][:self.coordinate_dim]
+                coords[i] = torch.tensor(coord_vals, dtype=torch.float32)
+                n_found += 1
+        self.coordinates = coords.to(self.freq_bands.device)
+        self.logger.info(
+            f"Set coordinates for {n_found}/{C} channels "
+            f"(range: [{coords.min():.4f}, {coords.max():.4f}])"
+        )
+
+    def _fourier_encode(self, coords: torch.Tensor) -> torch.Tensor:
+        """Compute Fourier encoding of coordinates.
+
+        Args:
+            coords: (..., coordinate_dim) tensor.
+
+        Returns:
+            Fourier features of shape (..., 2 * n_frequencies * coordinate_dim).
+        """
+        # coords: (..., D), freq_bands: (F,)
+        # outer product per dimension: (..., D, F)
+        proj = coords.unsqueeze(-1) * self.freq_bands  # (..., D, F)
+        # sin and cos concatenated: (..., D, 2F)
+        fourier = torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
+        # flatten last two dims: (..., 2*F*D)
+        return fourier.flatten(start_dim=-2)
+
+    def forward(self, channel_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute Fourier spatial embeddings.
+
+        Args:
+            channel_mask: Optional (B, C) mask. Not used for computation (coordinates
+                are fixed), but included for API consistency.
+
+        Returns:
+            Spatial embeddings of shape (C, emb_size). Batch-independent since
+            coordinates are static; caller broadcasts to batch dimension.
+        """
+        if self.coordinates.numel() == 0:
+            raise RuntimeError(
+                "Coordinates not set. Call set_coordinates() before forward()."
+            )
+
+        coords = self.coordinates  # (C, D)
+
+        # Augmentation: Gaussian noise on coordinates during training
+        if self.training and self.augmentation_noise_std > 0:
+            noise = torch.randn_like(coords) * self.augmentation_noise_std
+            coords = coords + noise
+
+        # Fourier path
+        fourier_features = self._fourier_encode(coords)  # (C, 2*F*D)
+        fourier_emb = self.fourier_proj(fourier_features)  # (C, emb_size)
+
+        # Combine with learnable linear path
+        if self.learnable_linear:
+            linear_emb = self.linear_proj(coords)  # (C, emb_size)
+            combined = fourier_emb + linear_emb
+        else:
+            combined = fourier_emb
+
+        return self.output_norm(combined)  # (C, emb_size)
+
+
+class ChannelEmbeddingComposer(nn.Module):
+    """Composes multiple channel embedding strategies into a single embedding.
+
+    Manages any combination of:
+    - learned: Fixed per-channel-index nn.Parameter table
+    - spectral: Data-driven PLV-based spectral embeddings (GINR)
+    - fourier: Fixed 3D coordinate Fourier PE (REVE)
+
+    All enabled strategies produce (B, C, emb_size) or (C, emb_size) tensors
+    that are summed to form the final channel embedding.
+
+    Also owns special token embeddings (missing, unknown) for channel masking.
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        emb_size: int,
+        config: Dict[str, Any],
+        reference_coordinates: Optional[Dict[str, List[float]]] = None,
+        channel_names: Optional[List[str]] = None,
+    ):
+        super().__init__()
+        self.emb_size = emb_size
+        self.strategies: List[str] = []
+        self.logger = logging.getLogger(__name__ + ".ChannelEmbeddingComposer")
+
+        # Strategy 1: Learned table (per channel index)
+        learned_cfg = config.get('learned', {})
+        self.use_learned = learned_cfg.get('enabled', True)
+        if self.use_learned:
+            self.channel_embedding = nn.Parameter(torch.randn(n_channels, emb_size))
+            self.strategies.append('learned')
+
+        # Strategy 2: Spectral (PLV-based, data-driven)
+        spectral_cfg = config.get('spectral', {})
+        self.use_spectral = spectral_cfg.get('enabled', False)
+        self.spectral_module: Optional[SpectralChannelEmbedding] = None
+        if self.use_spectral:
+            sce_params = {k: v for k, v in spectral_cfg.items() if k != 'enabled'}
+            self.spectral_module = SpectralChannelEmbedding(emb_size=emb_size, **sce_params)
+            self.strategies.append('spectral')
+
+        # Strategy 3: Fourier (3D coordinate-based, REVE-style)
+        fourier_cfg = config.get('fourier', {})
+        self.use_fourier = fourier_cfg.get('enabled', False)
+        self.fourier_module: Optional[FourierSpatialEmbedding] = None
+        if self.use_fourier:
+            fourier_params = {
+                k: v for k, v in fourier_cfg.items()
+                if k not in ('enabled', 'spatial_coordinates_path')
+            }
+            self.fourier_module = FourierSpatialEmbedding(emb_size=emb_size, **fourier_params)
+
+            # Load coordinates from path if not provided directly
+            spatial_path = fourier_cfg.get('spatial_coordinates_path')
+            if reference_coordinates is None and spatial_path is not None:
+                import pickle
+                spatial_path = Path(spatial_path) if not isinstance(spatial_path, Path) else spatial_path
+                with open(spatial_path, 'rb') as f:
+                    reference_coordinates = pickle.load(f)
+                self.logger.info(f"Loaded spatial coordinates from {spatial_path}")
+
+            if reference_coordinates is not None and channel_names is not None:
+                self.fourier_module.set_coordinates(reference_coordinates, channel_names)
+            self._fourier_reference_coordinates = reference_coordinates
+            self.strategies.append('fourier')
+
+        # Special token embeddings (always present for masking)
+        self.missing_channel_embedding = nn.Parameter(torch.randn(1, emb_size))
+        self.unk_channel_embedding = nn.Parameter(torch.randn(1, emb_size))
+
+        if not self.strategies:
+            raise ValueError(
+                "At least one channel embedding strategy must be enabled. "
+                "Set learned.enabled=true, spectral.enabled=true, or fourier.enabled=true."
+            )
+
+        self.logger.info(f"ChannelEmbeddingComposer strategies: {self.strategies}")
+
+    def set_fourier_coordinates(
+        self,
+        coordinates_dict: Dict[str, List[float]],
+        channel_names: List[str],
+    ) -> None:
+        """Set Fourier spatial coordinates after initialization.
+
+        Call this once channel names are known (e.g. from the data module).
+
+        Args:
+            coordinates_dict: Mapping from channel name to [x, y, z].
+            channel_names: Ordered list of channel names.
+        """
+        if self.fourier_module is None:
+            raise RuntimeError(
+                "Cannot set Fourier coordinates: fourier strategy is not enabled."
+            )
+        self.fourier_module.set_coordinates(coordinates_dict, channel_names)
+        self._fourier_reference_coordinates = coordinates_dict
+
+    def compute_spectral_embeddings(
+        self,
+        x_for_plv: torch.Tensor,
+        channel_mask: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Compute spectral embeddings from signal data.
+
+        Called at the hierarchical model level where the full signal is available.
+
+        Args:
+            x_for_plv: Signal for PLV computation (B, C, T_effective).
+            channel_mask: Optional mask (B, C), True=valid.
+
+        Returns:
+            Spectral embeddings (B, C, emb_size) or None if spectral is not enabled.
+        """
+        if self.spectral_module is None:
+            return None
+        return self.spectral_module(x_for_plv, channel_mask)
+
+    def forward(
+        self,
+        batch_size: int,
+        n_channels: int,
+        device: torch.device,
+        channel_mask: Optional[torch.Tensor] = None,
+        spectral_embs: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compose channel embeddings from all enabled strategies.
+
+        Args:
+            batch_size: B (or B*N for virtual batch in hierarchical model).
+            n_channels: Number of channels C.
+            device: Target device.
+            channel_mask: Optional (B, C) validity mask.
+            spectral_embs: Precomputed spectral embeddings (B, C, E), or None.
+
+        Returns:
+            Combined channel embeddings of shape (B, C, emb_size).
+        """
+        combined = torch.zeros(
+            batch_size, n_channels, self.emb_size, device=device
+        )
+
+        if self.use_learned:
+            combined = combined + self.channel_embedding.unsqueeze(0).expand(batch_size, -1, -1)
+
+        if self.use_spectral and spectral_embs is not None:
+            combined = combined + spectral_embs
+
+        if self.use_fourier and self.fourier_module is not None:
+            fourier_emb = self.fourier_module(channel_mask)  # (C, E)
+            combined = combined + fourier_emb.unsqueeze(0).expand(batch_size, -1, -1)
+
+        return combined
+
 
 class ClassificationHead(nn.Sequential):
     """Module for classification head.

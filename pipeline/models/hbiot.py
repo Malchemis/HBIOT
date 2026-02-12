@@ -8,7 +8,7 @@ from linear_attention_transformer import LinearAttentionTransformer
 
 from pipeline.models.full_attention_transformer import FullAttentionTransformer
 from pipeline.models.biot import BIOTEncoder
-from pipeline.models.commons import SpectralChannelEmbedding
+from pipeline.models.commons import ChannelEmbeddingComposer
 
 
 def log_tensor_statistics(tensor: torch.Tensor, name: str, logger_obj: Optional[logging.Logger] = None) -> None:
@@ -105,11 +105,11 @@ class BIOTHierarchicalClassifier(nn.Module):
             transformer: Optional[dict] = None,
             token_selection: Optional[dict] = None,
             classifier: Optional[dict] = None,
-            log_dir: Optional[str] = None,
             n_classes: int = 1,
-            reference_coordinates: Dict[str, List[float]] = {},
+            reference_coordinates: Dict[str, List[float]] = None,
             max_virtual_batch_size: int = 640,
-            spectral_channel_embedding: Optional[dict] = None,
+            channel_embedding: Optional[dict] = None,
+            window_overlap: float = 0.5,
             **kwargs
     ):
         """Initialize the BIOT hierarchical encoder.
@@ -129,14 +129,17 @@ class BIOTHierarchicalClassifier(nn.Module):
             token_selection: Parameters for token selection.
                 Can include 'n_selected_tokens', 'use_cls_token', 'use_mean_pool', 'use_max_pool' keys.
             classifier: Parameters for the classification head.
-            log_dir: Directory for logging (optional).
             n_classes: Number of output classes for classification.
             reference_coordinates: Dictionary mapping channel names to their spatial coordinates.
             max_virtual_batch_size: Maximum virtual batch size (BxN) to process in a single forward pass. Defaults to 640 = 32x20 (tested empirically on h100 with 80GB RAM).
                 When BxN exceeds this value, processing is done in chunks. Default: 640.
-            spectral_channel_embedding: Optional dict with config for SpectralChannelEmbedding.
-                Keys: enabled, n_eigenvectors, projection_type, siren_hidden_dim, siren_n_layers,
-                siren_w0_initial, siren_w0, eigen_eps.
+            channel_embedding: Composable channel embedding config with keys:
+                learned: {enabled: bool}
+                spectral: {enabled: bool, n_eigenvectors, projection_type, ...}
+                fourier: {enabled: bool, n_frequencies, learnable_linear, ...}
+            window_overlap: Overlap between consecutive temporal windows (must match
+                dataset_config.window_overlap). Used to reconstruct non-overlapping signal
+                for PLV computation.
             **kwargs: Additional keyword arguments for flexibility.
         """
         super().__init__()
@@ -147,6 +150,9 @@ class BIOTHierarchicalClassifier(nn.Module):
         assert transformer is not None, "Transformer parameters must be provided."
         assert token_selection is not None, "Token selection parameters must be provided."
         assert classifier is not None, "Classifier parameters must be provided."
+
+        if reference_coordinates is None:
+            reference_coordinates = {}
 
         print(f"Initializing BIOTHierarchicalClassifier with input shape: {input_shape}")
         n_windows, n_channels, n_samples_per_window = input_shape
@@ -180,6 +186,23 @@ class BIOTHierarchicalClassifier(nn.Module):
         if self.n_tokens_per_window == 0:
             raise ValueError("At least one token type must be enabled in token_selection config")
 
+        # Window overlap for PLV signal reconstruction
+        self.window_overlap = window_overlap
+        assert 0.0 <= self.window_overlap < 1.0, "window_overlap must be in the range [0.0, 1.0)"
+
+        # Channel embedding composer: composable strategy (learned, spectral, fourier)
+        # Must be created before BIOTEncoder which receives a reference to it.
+        channel_emb_config = channel_embedding if channel_embedding is not None else {'learned': {'enabled': True}}
+
+        ref_coords = reference_coordinates if isinstance(reference_coordinates, dict) else None
+        self.channel_embedding_composer = ChannelEmbeddingComposer(
+            n_channels=n_channels,
+            emb_size=emb_size,
+            config=channel_emb_config,
+            reference_coordinates=ref_coords,
+            channel_names=None,  # Set later via set_fourier_coordinates() from data module
+        )
+
         # Modified BIOT encoder for window-level processing with configurable tokens
         self.window_encoder = BIOTEncoder(
             emb_size=emb_size,
@@ -196,7 +219,7 @@ class BIOTHierarchicalClassifier(nn.Module):
             overlap=overlap,
             mode=mode,                                    # Processing mode: "raw", "spec", or "features"
             linear_attention=linear_attention,            # Use linear attention or full attention for window encoder
-            reference_coordinates=reference_coordinates,  # Pass spatial coordinates to window encoder
+            channel_embedding_composer=self.channel_embedding_composer,  # Shared composer for channel embeddings
         )
 
         # Learnable embeddings for each window position
@@ -240,16 +263,25 @@ class BIOTHierarchicalClassifier(nn.Module):
             from pipeline.models.commons import ClassificationHead
             self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes)
 
-        # Optional spectral channel embedding (data-driven from functional connectivity)
-        self.spectral_channel_embedding_module = None
-        if spectral_channel_embedding is not None and spectral_channel_embedding.get("enabled", False):
-            sce_cfg = {k: v for k, v in spectral_channel_embedding.items() if k != "enabled"}
-            self.spectral_channel_embedding_module = SpectralChannelEmbedding(
-                emb_size=emb_size, **sce_cfg
-            )
-            self.logger.info(f"SpectralChannelEmbedding enabled with config: {sce_cfg}")
+    def set_fourier_coordinates(
+        self,
+        coordinates_dict: Dict[str, List[float]],
+        channel_names: List[str],
+    ) -> None:
+        """Set Fourier spatial coordinates on the channel embedding composer.
 
-    def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None, window_mask: Optional[torch.Tensor] = None, unk_augment: float = 0.0, unknown_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        Should be called once channel names are available (e.g. from the data module
+        during setup). Only needed when fourier embedding is enabled in the config.
+
+        Args:
+            coordinates_dict: Mapping from channel name to [x, y, z].
+            channel_names: Ordered list of channel names matching model's channel order.
+        """
+        self.channel_embedding_composer.set_fourier_coordinates(coordinates_dict, channel_names)
+
+    def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None,
+                window_mask: Optional[torch.Tensor] = None, unk_augment: float = 0.0,
+                unknown_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass of the BIOT hierarchical encoder with detailed shape tracking.
 
         DETAILED DATA FLOW:
@@ -320,16 +352,30 @@ class BIOTHierarchicalClassifier(nn.Module):
             unknown_mask_reshaped = unknown_mask_reshaped.view(virtual_batch_size, n_channels)
             # Shape: (B, N, C) → (BxN, C)
 
-        # Compute spectral channel embeddings from concatenated windows (if enabled)
+        # Compute spectral channel embeddings from signal (if spectral strategy is enabled)
         spectral_embs_expanded = None
-        if self.spectral_channel_embedding_module is not None:
-            # Concatenate all windows per sample: (B, N, C, T) → (B, C, N*T) for robust PLV
-            x_concat = x.transpose(1, 2).reshape(batch_size, n_channels, n_windows * n_samples)
-            spectral_embs = self.spectral_channel_embedding_module(x_concat, channel_mask)  # (B, C, E)
-            # Expand for virtual batch: (B, C, E) → (B, 1, C, E) → (B, N, C, E) → (B*N, C, E)
-            spectral_embs_expanded = spectral_embs.unsqueeze(1).expand(-1, n_windows, -1, -1)
-            spectral_embs_expanded = spectral_embs_expanded.reshape(virtual_batch_size, n_channels, -1)
-            log_tensor_statistics(spectral_embs_expanded, "HBIOT spectral channel embeddings (expanded)", self.logger)
+        if self.channel_embedding_composer.use_spectral:
+            # Reconstruct non-overlapping signal for PLV to avoid duplicated samples.
+            # With window_overlap > 0, consecutive windows share samples. Naive concatenation
+            # (B, N, C, T) → (B, C, N*T) would repeat overlapping portions, biasing PLV.
+            stride = int(n_samples * (1.0 - self.window_overlap))
+            if 0 < stride < n_samples:
+                # Take only the stride portion from each window, full last window
+                parts = [x[:, w, :, :stride] for w in range(n_windows - 1)]
+                parts.append(x[:, -1, :, :])  # (B, C, n_samples)
+                x_for_plv = torch.cat(parts, dim=-1)  # (B, C, stride*(N-1) + n_samples)
+            else:
+                # No overlap: concatenate all windows
+                x_for_plv = x.transpose(1, 2).reshape(batch_size, n_channels, n_windows * n_samples)
+
+            spectral_embs = self.channel_embedding_composer.compute_spectral_embeddings(
+                x_for_plv, channel_mask
+            )  # (B, C, E)
+            if spectral_embs is not None:
+                # Expand for virtual batch: (B, C, E) → (B, 1, C, E) → (B, N, C, E) → (B*N, C, E)
+                spectral_embs_expanded = spectral_embs.unsqueeze(1).expand(-1, n_windows, -1, -1)
+                spectral_embs_expanded = spectral_embs_expanded.reshape(virtual_batch_size, n_channels, -1)
+                log_tensor_statistics(spectral_embs_expanded, "HBIOT spectral channel embeddings (expanded)", self.logger)
 
         # Process windows through BIOT encoder with optional chunking for large virtual batches
         if virtual_batch_size <= self.max_virtual_batch_size:

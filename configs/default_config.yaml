@@ -70,16 +70,34 @@ model:
       dropout: 0.2                   # Classifier dropout rate
 
     reference_coordinates: "${reference_channels}"  # Path to channel coordinate file
+    window_overlap: 0.5               # Must match dataset_config.window_overlap (for PLV signal reconstruction)
 
-    spectral_channel_embedding:
-      enabled: false                    # Disabled by default, opt-in
-      n_eigenvectors: 16
-      projection_type: "siren"          # "siren" or "linear"
-      siren_hidden_dim: 128
-      siren_n_layers: 3
-      siren_w0_initial: 30.0
-      siren_w0: 1.0
-      eigen_eps: 1.0e-6
+    # Channel embedding configuration
+    # Enable any combination of strategies; embeddings are summed.
+    # Strategies: learned (per-channel table), spectral (PLV-based GINR), fourier (3D coordinate REVE-style)
+    channel_embedding:
+      learned:
+        enabled: true                   # Per-channel-index learned embedding table
+
+      spectral:
+        enabled: false                  # PLV-based spectral coordinates (GINR)
+        n_eigenvectors: 16
+        projection_type: "siren"        # "siren" or "linear"
+        siren_hidden_dim: 128
+        siren_n_layers: 3
+        siren_w0_initial: 30.0
+        siren_w0: 1.0
+        eigen_eps: 1.0e-6
+        sqrt_n_rescale: true            # GINR √n rescaling for graph-size invariance
+        output_norm: true               # LayerNorm on projection output
+        augmentation_noise_std: 0.05    # Gaussian noise on spectral coords during training (0=disabled)
+
+      fourier:
+        enabled: false                  # REVE-style 3D Fourier PE from sensor coordinates
+        n_frequencies: 8                # Number of Fourier frequency bands per dimension
+        learnable_linear: true          # Parallel learnable linear path (REVE)
+        augmentation_noise_std: 0.0025  # Gaussian noise on 3D coords during training (~0.25cm)
+        spatial_coordinates_path: ""    # Path to Dict[str, [x,y,z]] pickle (required if enabled)
 
   # BIOT: Single-stage transformer (simpler, faster)
   BIOT:
@@ -251,6 +269,7 @@ data:
       # ----------------------------------------------------------------------
       # Spike Labeling Parameters
       # ----------------------------------------------------------------------
+      refine_spike_positions: true # Refine spike positions using peak detection of Global Field Power (GFP)
       spike_overlap_threshold: 0.0            # Minimum overlap to label window as positive
                                               # 0.0 = any overlap counts
                                               # 0.9 = 90% of spike must be in window
