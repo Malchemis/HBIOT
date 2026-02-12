@@ -457,7 +457,7 @@ trainer:
 
   # DDP (Distributed Data Parallel) configuration
   ddp:
-    find_unused_parameters: true              # Find unused parameters (needed for some models)
+    find_unused_parameters: false              # Set true only if model has conditional unused params
 
 # ------------------------------------------------------------------------------
 # Callbacks Configuration
