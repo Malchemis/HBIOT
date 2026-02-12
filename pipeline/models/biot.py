@@ -235,6 +235,7 @@ class BIOTEncoder(nn.Module):
             use_mean_pool: int = 0,
             use_max_pool: bool = False,
             use_min_pool: bool = False,
+            channel_embedding_composer: Optional['ChannelEmbeddingComposer'] = None,
             **kwargs
     ):
         """Initialize the modified BIOT encoder.
@@ -253,9 +254,9 @@ class BIOTEncoder(nn.Module):
             n_channels: Number of input channels.
             token_size: Number of FFT points for Spectral mode / Number of samples for Raw mode.
             overlap: Overlap between patches for raw data mode.
-            raw: Whether to use raw time-domain processing.
             linear_attention: Whether to use linear attention or full attention.
-            reference_coordinates: Mapping from channel names to coordinate positions.
+            channel_embedding_composer: Shared ChannelEmbeddingComposer for channel embeddings.
+                If None, a default learned-only composer is created (standalone use).
             **kwargs: Additional keyword arguments.
         """
         super().__init__()
@@ -365,11 +366,16 @@ class BIOTEncoder(nn.Module):
         self.positional_embedding = nn.Parameter(torch.randn(self.n_patches_per_channel, emb_size))
        
         # Channel embeddings to distinguish MEG channels
-        self.channel_embedding = nn.Parameter(torch.randn(n_channels, emb_size))  
-        # +1 for missing channel (padded data), +1 for unknown channel (no mapping)
-        self.unk_channel_embedding = nn.Parameter(torch.randn(1, emb_size))
-        self.missing_channel_embedding = nn.Parameter(torch.randn(1, emb_size)) 
-        self.training = True
+        # Use provided composer or create a default learned-only one (standalone mode)
+        if channel_embedding_composer is not None:
+            self.channel_embedding_composer = channel_embedding_composer
+        else:
+            from pipeline.models.commons import ChannelEmbeddingComposer
+            self.channel_embedding_composer = ChannelEmbeddingComposer(
+                n_channels=n_channels,
+                emb_size=emb_size,
+                config={'learned': {'enabled': True}},
+            )
 
     def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor], unk_augment: float = 0.0, unknown_mask: Optional[torch.Tensor] = None, spectral_channel_embs: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass with detailed multi-stage processing and shape tracking.
@@ -463,13 +469,14 @@ class BIOTEncoder(nn.Module):
         emb = torch.cat(emb_seq, dim=1)  # (BxN, C*P, E)
         log_tensor_statistics(emb, "BIOTEncoder after patch embedding concatenation", self.logger)
 
-        ## Add channel identity embeddings
-        # Initialize base channel embeddings for all channels
-        channel_embs = self.channel_embedding.unsqueeze(0).expand(batch_size, -1, -1)  # (BxN, C, E)
-
-        # Add data-driven spectral channel embeddings (from functional connectivity)
-        if spectral_channel_embs is not None:
-            channel_embs = channel_embs + spectral_channel_embs  # (BxN, C, E)
+        ## Add channel identity embeddings (composed from enabled strategies)
+        channel_embs = self.channel_embedding_composer(
+            batch_size=batch_size,
+            n_channels=n_channels,
+            device=x.device,
+            channel_mask=channel_mask,
+            spectral_embs=spectral_channel_embs,
+        )  # (BxN, C, E)
 
         if channel_mask is None:
             channel_mask = torch.ones((batch_size, n_channels), dtype=torch.bool, device=x.device)
@@ -479,7 +486,7 @@ class BIOTEncoder(nn.Module):
         missing_mask = ~channel_mask  # (BxN, C) - True where channel is missing
         channel_embs = torch.where(
             missing_mask.unsqueeze(-1),  # (BxN, C, 1)
-            self.missing_channel_embedding.expand(batch_size, n_channels, -1),
+            self.channel_embedding_composer.missing_channel_embedding.expand(batch_size, n_channels, -1),
             channel_embs
         )
 
@@ -494,14 +501,14 @@ class BIOTEncoder(nn.Module):
 
             channel_embs = torch.where(
                 unk_mask.unsqueeze(-1),  # (BxN, C, 1)
-                self.unk_channel_embedding.expand(batch_size, n_channels, -1), # from (1, E) to (BxN, C, E)
+                self.channel_embedding_composer.unk_channel_embedding.expand(batch_size, n_channels, -1),
                 channel_embs
             )
         elif unknown_mask is not None:
             # Apply provided unknown mask (inference-time handling)
             channel_embs = torch.where(
                 unknown_mask.unsqueeze(-1),  # (BxN, C, 1)
-                self.unk_channel_embedding.expand(batch_size, n_channels, -1),
+                self.channel_embedding_composer.unk_channel_embedding.expand(batch_size, n_channels, -1),
                 channel_embs
             )
 

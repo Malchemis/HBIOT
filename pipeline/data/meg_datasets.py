@@ -62,7 +62,6 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 from pipeline.data.preprocessing.file_manager import get_patient_group
 from pipeline.data.preprocessing.segmentation import (
     create_chunks,
-    create_windows,
     extract_random_chunk,
 )
 from pipeline.data.preprocessing.signal_processing import load_and_process_meg_data, augment_data, find_gfp_peak_in_window
@@ -575,6 +574,19 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
         local_chunk_idx = idx - self.cumulative_chunks[rec_idx]
 
         meg_data, spike_samples, metadata, channel_info = self.recordings[rec_idx]
+
+        if self.config.get('refine_spike_positions', False):
+            new_spike_samples = []
+            n_samples_total = meg_data.shape[1]
+            for spike_sample in spike_samples:
+                peak_sample, peak_time = find_gfp_peak_in_window(
+                    meg_data,
+                    max(0, spike_sample - int(self.config['first_half_spike_duration'] * self.config['sampling_rate'])),
+                    min(n_samples_total, spike_sample + int(self.config['second_half_spike_duration'] * self.config['sampling_rate'])),
+                    self.config['sampling_rate']
+                )
+                new_spike_samples.append(peak_sample)
+            spike_samples = sorted(set(new_spike_samples)) # Remove duplicates if peaks overlap
 
         if self.is_test:
             from .preprocessing.segmentation import calculate_window_labels_from_spikes
