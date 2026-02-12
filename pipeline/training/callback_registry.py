@@ -4,16 +4,20 @@ This module provides custom callbacks for MEG spike detection training including
 metrics evaluation, model checkpointing, and comprehensive reporting capabilities.
 """
 
+from __future__ import annotations
+
 import os
 import logging
-from typing import Union, Dict, Type, Any, List, Optional
+from typing import TYPE_CHECKING, Union, Dict, Type, Any, List, Optional
 
 import torch
 import torch.nn as nn
 import lightning.pytorch as L
 from pipeline.eval.metrics import MetricsAggregator
 from pipeline.training.lightning_module import MEGSpikeDetector
-from pipeline.training.unsupervised_pretrain_lit_mod import MEGUnsupervisedPretrainer
+
+if TYPE_CHECKING:
+    from pipeline.training.unsupervised_pretrain_lit_mod import MEGUnsupervisedPretrainer
 
 logger = logging.getLogger(__name__)
 from lightning.pytorch.callbacks import (
@@ -28,19 +32,10 @@ from lightning.pytorch.callbacks import (
     StochasticWeightAveraging
 )
 
-try:
-    from lightning import LightningModule
-    LIGHTNING_AVAILABLE = True
-except ImportError:
-    LightningModule = None
-    LIGHTNING_AVAILABLE = False
-
-from torch import distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
 
 def is_fsdp_model(pl_module):
     """Check if a module uses FSDP (Fully Sharded Data Parallel)."""
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     return isinstance(pl_module, FSDP) or any(isinstance(m, FSDP) for m in pl_module.modules())
 
 
@@ -834,10 +829,15 @@ class GradientNormLogger(L.Callback):
             max_norm: Maximum allowed norm
         """
         if is_fsdp_model(pl_module):
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            try:
+                from lightning import LightningModule
+            except ImportError:
+                LightningModule = None
             # Use FSDP's built-in clip_grad_norm_
             if isinstance(pl_module, FSDP):
                 pl_module.clip_grad_norm_(max_norm)
-            elif LIGHTNING_AVAILABLE and LightningModule is not None and isinstance(pl_module, LightningModule):
+            elif LightningModule is not None and isinstance(pl_module, LightningModule):
                 pl_module.trainer.model.clip_grad_norm_(max_norm)
             else:
                 # Find root FSDP module
@@ -969,6 +969,7 @@ class GradientNormLogger(L.Callback):
         # Handle FSDP models specially (aggregate across shards)
         if is_fsdp_model(pl_module):
             if self.norm_type == 2.0:
+                from torch import distributed as dist
                 # L2 norm for FSDP: sum squared norms and all-reduce
                 local_norm_sq = torch.stack(
                     [p.grad.to(dtype).norm(2).pow(2) for p in parameters if p.grad is not None]

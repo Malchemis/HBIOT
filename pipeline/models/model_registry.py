@@ -5,27 +5,33 @@ for creating model instances from configuration dictionaries. Supports dynamic
 model registration and validation of model parameters.
 """
 
+import importlib
 import logging
 import traceback
-from typing import Dict, Type, Any
+from typing import Dict, Type, Union, Any
 import torch.nn as nn
-from pipeline.models.biot import BIOTClassifier
-from pipeline.models.hbiot import BIOTHierarchicalClassifier
-from pipeline.models.sfcn import SFCN
-from pipeline.models.famed import FAMEDWrapper
-from pipeline.models.emsnet import EMSNET
 
 
 logger = logging.getLogger(__name__)
 
-# Dictionary mapping model names to their classes
-MODEL_REGISTRY: Dict[str, Type[nn.Module]] = {
-    "BIOT": BIOTClassifier,
-    "BIOTHierarchical": BIOTHierarchicalClassifier,
-    "SFCN": SFCN,
-    "FAMED": FAMEDWrapper,
-    "EMSNET": EMSNET,
+# String-based registry: model name -> "module.path.ClassName"
+# Classes are imported on demand to avoid loading all model dependencies at startup.
+MODEL_REGISTRY: Dict[str, Union[str, Type[nn.Module]]] = {
+    "BIOT": "pipeline.models.biot.BIOTClassifier",
+    "BIOTHierarchical": "pipeline.models.hbiot.BIOTHierarchicalClassifier",
+    "SFCN": "pipeline.models.sfcn.SFCN",
+    "FAMED": "pipeline.models.famed.FAMEDWrapper",
+    "EMSNET": "pipeline.models.emsnet.EMSNET",
 }
+
+
+def _resolve_model_class(entry: Union[str, Type[nn.Module]]) -> Type[nn.Module]:
+    """Resolve a registry entry to an actual class, importing if needed."""
+    if isinstance(entry, str):
+        module_path, class_name = entry.rsplit(".", 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    return entry
 
 
 def get_model_class(model_name: str) -> Type[nn.Module]:
@@ -42,8 +48,8 @@ def get_model_class(model_name: str) -> Type[nn.Module]:
     """
     if model_name not in MODEL_REGISTRY:
         raise ValueError(f"Model '{model_name}' not found in registry. Available models: {list(MODEL_REGISTRY.keys())}")
-    
-    return MODEL_REGISTRY[model_name]
+
+    return _resolve_model_class(MODEL_REGISTRY[model_name])
 
 
 def create_model(model_config: Dict[str, Any]) -> nn.Module:
