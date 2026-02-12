@@ -16,8 +16,6 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy import signal as scipy_signal
-from scipy import stats
 
 
 # ------ FEATURE EXTRACTION MODULES ------ #
@@ -358,6 +356,9 @@ class PatchFeatureEmbedding(nn.Module):
         Returns:
             Tensor of shape (batch_size, emb_size)
         """
+        from scipy import signal as scipy_signal
+        from scipy import stats
+
         batch_size = patch.shape[0]
         data = patch.detach().cpu().numpy()
 
