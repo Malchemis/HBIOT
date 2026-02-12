@@ -229,7 +229,7 @@ def calculate_window_labels_from_spikes(
         config: Dataset configuration
 
     Returns:
-        Array of labels (n_windows,) with values 0.0 or 1.0
+        Array of labels (n_windows,) with values 0.0 or 1.0, or (n_windows, 2) if onset prediction
     """
     window_duration_samples = int(config['window_duration_s'] * config['sampling_rate'])
     window_overlap = config.get('window_overlap', 0.0)
@@ -238,25 +238,35 @@ def calculate_window_labels_from_spikes(
     spike_duration_samples = int(config.get('estimated_spike_duration_s', 0.1) * config['sampling_rate'])
     first_half = int(config.get('first_half_spike_duration', 0.05) * config['sampling_rate'])
     second_half = int(config.get('second_half_spike_duration', 0.05) * config['sampling_rate'])
+    
+    predict_event_onset = config.get('predict_event_onset', False)
 
     labels = []
 
     for i in range(len(windows)):
-        # Calculate window boundaries
         seg_start = i * window_step
         seg_end = seg_start + window_duration_samples
 
-        # Find spikes and calculate overlap
         max_overlap = 0.0
+        best_spike_pos = None
 
         for spike_pos in spike_positions:
             spike_start = spike_pos - first_half
             spike_end = spike_pos + second_half
-
-            # Calculate overlap between window and spike duration
             overlap = max(0, min(seg_end, spike_end) - max(seg_start, spike_start))
-            max_overlap = max(max_overlap, overlap / spike_duration_samples)
+            overlap_ratio = overlap / spike_duration_samples
 
-        labels.append(1.0 if max_overlap > 0 else 0.0)
+            if overlap_ratio > max_overlap:
+                max_overlap = overlap_ratio
+                if predict_event_onset:
+                    best_spike_pos = spike_pos
+
+        presence = 1.0 if max_overlap > 0 else 0.0
+
+        if predict_event_onset:
+            onset = (best_spike_pos - seg_start) / window_duration_samples if best_spike_pos is not None else 0.0
+            labels.append([presence, onset])
+        else:
+            labels.append(presence)
 
     return np.array(labels, dtype=np.float32)

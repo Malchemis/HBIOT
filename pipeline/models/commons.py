@@ -988,17 +988,17 @@ class ChannelEmbeddingComposer(nn.Module):
                 k: v for k, v in fourier_cfg.items()
                 if k not in ('enabled', 'spatial_coordinates_path', 'channel_order')
             }
-            
+
             channel_order_path = fourier_cfg.get('channel_order')
             channel_loc_path = fourier_cfg.get('spatial_coordinates_path')
             with open(channel_order_path, 'rb') as f:
                 channel_order = pickle.load(f)
                 fourier_params['channel_order'] = channel_order
-            
-            with open(channel_loc_path, 'rb') as f:            
+
+            with open(channel_loc_path, 'rb') as f:
                 coordinates_dict = pickle.load(f)
                 fourier_params['coordinates_dict'] = coordinates_dict
-            
+
             self.fourier_module = FourierSpatialEmbedding(emb_size=emb_size, **fourier_params)
             self.strategies.append('fourier')
 
@@ -1080,19 +1080,25 @@ class ClassificationHead(nn.Sequential):
         clshead (nn.Sequential): Sequential module with the classification layers.
     """
 
-    def __init__(self, emb_size: int, n_classes: int):
+    def __init__(self, emb_size: int, n_classes: int, predict_event_onset: bool = False, **kwargs):
         """Initialize the classification head.
 
         Args:
             emb_size: Size of the input embedding.
             n_classes: Number of output classes.
+            predict_event_onset (bool, optional): Whether to predict event onset within window.
+                Default: False (do not predict event onset, only spike presence)
         """
         super().__init__()
+        
+        self.predict_event_onset = predict_event_onset
+        self.n_classes = n_classes
+        last_linear_out = n_classes if not predict_event_onset else n_classes * 2
         self.clshead = nn.Sequential(
             nn.ELU(),
             nn.Linear(emb_size, emb_size // 2),
             nn.ELU(),
-            nn.Linear(emb_size // 2, n_classes),
+            nn.Linear(emb_size // 2, last_linear_out),
         )
         self.logger = logging.getLogger(__name__ + ".ClassificationHead")
         self.logger.debug(f"Initialized with emb_size={emb_size}, n_classes={n_classes}")
@@ -1107,7 +1113,10 @@ class ClassificationHead(nn.Sequential):
         """
         # Classify each window
         # x: (batch, emb_size) or (batch * n_windows, emb_size)
-        return self.clshead(x).squeeze(-1)
+        logits = self.clshead(x)
+        if self.n_classes == 1 and not self.predict_event_onset:
+            logits = logits.squeeze(-1)
+        return logits
 
 
 class AttentionClassificationHead(nn.Module):
@@ -1124,9 +1133,13 @@ class AttentionClassificationHead(nn.Module):
         n_tokens_per_window: int,
         num_heads: int = 4,
         dropout: float = 0.1,
+        predict_event_onset: bool = False,
+        **kwargs,
     ):
         super().__init__()
         self.n_tokens_per_window = n_tokens_per_window
+        self.n_classes = n_classes
+        self.predict_event_onset = predict_event_onset
 
         # learnable classification query token
         self.classification_query = nn.Parameter(torch.randn(1, 1, emb_size))
@@ -1140,13 +1153,14 @@ class AttentionClassificationHead(nn.Module):
         )
 
         # final MLP to map the attended embedding to class‐scores
+        last_linear_out = n_classes if not predict_event_onset else n_classes * 2
         self.classifier = nn.Sequential(
             nn.LayerNorm(emb_size),
             nn.Dropout(dropout),
             nn.Linear(emb_size, emb_size // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(emb_size // 2, n_classes),
+            nn.Linear(emb_size // 2, last_linear_out),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1169,5 +1183,7 @@ class AttentionClassificationHead(nn.Module):
         # classifier → (B, n_classes)
         logits = self.classifier(pooled)
 
-        return logits.squeeze(-1)
+        if self.n_classes == 1 and not self.predict_event_onset:
+            logits = logits.squeeze(-1)
 
+        return logits

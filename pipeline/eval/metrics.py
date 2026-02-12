@@ -76,7 +76,10 @@ class MetricsAggregator:
         batch_size: Optional[int] = None,
         n_windows: Optional[int] = None,
         metadata: Optional[List[Dict[str, Any]]] = None,
-        losses: Optional[np.ndarray] = None,  # NEW: Per-window losses
+        losses: Optional[np.ndarray] = None,
+        onset_probs: Optional[np.ndarray] = None,
+        gt_onsets: Optional[np.ndarray] = None,
+        onset_losses: Optional[np.ndarray] = None,
     ):
         """Update metrics with batch data.
 
@@ -87,7 +90,10 @@ class MetricsAggregator:
             batch_size: Batch size for sequence data
             n_windows: Number of windows per sequence
             metadata: List of metadata dictionaries containing patient/file information
-            losses: Per-window losses (batch_size, n_windows) - optional
+            losses: Per-window presence losses (batch_size, n_windows)
+            onset_probs: Predicted onset positions [0-1] (batch_size, n_windows)
+            gt_onsets: Ground truth onset positions [0-1] (batch_size, n_windows)
+            onset_losses: Per-window onset losses (batch_size, n_windows)
         """
         # Ensure inputs are numpy arrays
         probs = np.asarray(probs)
@@ -131,35 +137,45 @@ class MetricsAggregator:
             # Use start_window_idx (new unified field) with fallback to old field names
             start_window_idx = meta.get('start_window_idx', meta.get('start_position', 0))
 
-            # Extract valid data
             valid_probs = probs[i, valid_indices]
             valid_gt = gt[i, valid_indices]
             valid_losses = losses[i, valid_indices] if losses is not None else np.zeros(valid_indices.sum())
 
-            # Get window indices (within chunk)
+            valid_onset_probs = onset_probs[i, valid_indices] if onset_probs is not None else None
+            valid_gt_onsets = gt_onsets[i, valid_indices] if gt_onsets is not None else None
+            valid_onset_losses = onset_losses[i, valid_indices] if onset_losses is not None else None
+
             window_indices = np.where(valid_indices)[0]
 
-            # Create records for each valid window
-            for j, (window_idx, prob, label, loss) in enumerate(zip(window_indices, valid_probs, valid_gt, valid_losses)):
-                # Global window position = start_window_idx + window_idx
+            for j, window_idx in enumerate(window_indices):
                 global_window_idx = start_window_idx + window_idx
+                prob = valid_probs[j]
+                label = valid_gt[j]
+                loss = valid_losses[j] if losses is not None else np.nan
 
                 record = {
                     'prob': float(prob),
                     'gt': int(label),
                     'pred': int(prob >= self.threshold),
-                    'loss': float(loss) if losses is not None else np.nan,
+                    'loss': float(loss),
                     'patient_id': patient_id,
                     'group': group,
                     'file_name': file_name,
-                    'sample_idx': len(self.data_buffer) + j,  # Unique sample ID
-                    'window_idx': int(window_idx),  # Window index within chunk
-                    'global_window_idx': int(global_window_idx),  # Global position in file
+                    'sample_idx': len(self.data_buffer) + j,
+                    'window_idx': int(window_idx),
+                    'global_window_idx': int(global_window_idx),
                     'batch_idx': i,
-                    # Add confidence metrics
-                    'confidence': float(abs(prob - 0.5)),  # Distance from decision boundary
+                    'confidence': float(abs(prob - 0.5)),
                     'correct': int((prob >= self.threshold) == label),
                 }
+
+                if valid_onset_probs is not None:
+                    record['onset_prob'] = float(valid_onset_probs[j])
+                if valid_gt_onsets is not None:
+                    record['gt_onset'] = float(valid_gt_onsets[j])
+                if valid_onset_losses is not None:
+                    record['onset_loss'] = float(valid_onset_losses[j])
+
                 self.data_buffer.append(record)
 
     def _build_dataframe(self):
@@ -493,11 +509,24 @@ class MetricsAggregator:
         # 1. Compute standard metrics (DEFAULT - all windows with equal weight)
         metrics = self._compute_binary_metrics(all_gt, all_probs)
 
-        # Add dataset statistics
         metrics['n_samples'] = len(self.df)
         metrics['n_positive'] = int(all_gt.sum())
         metrics['n_negative'] = int((1 - all_gt).sum())
         metrics['positive_rate'] = float(all_gt.mean())
+
+        if 'onset_prob' in self.df.columns and 'gt_onset' in self.df.columns:
+            spike_mask = self.df['gt'] == 1
+            if spike_mask.sum() > 0:
+                onset_pred = self.df.loc[spike_mask, 'onset_prob']
+                onset_true = self.df.loc[spike_mask, 'gt_onset']
+                errors = onset_pred - onset_true
+
+                metrics['onset_mae'] = float(np.abs(errors).mean())
+                metrics['onset_rmse'] = float(np.sqrt((errors ** 2).mean()))
+
+                onset_std = onset_true.std()
+                if onset_std > 0:
+                    metrics['onset_nrmse'] = float(metrics['onset_rmse'] / onset_std)
 
         # 2. Compute STRIDED metrics (non-overlapping windows only)
         if 'strided' in self.df.columns:

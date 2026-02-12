@@ -10,6 +10,8 @@ from typing import Dict, Type, Any, Optional
 import torch
 import torch.nn as nn
 
+from collections import deque
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,11 +59,14 @@ class FocalLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         
-        # Remove unused parameters
-        kwargs.pop('smoothing', None)
-        
         # Use BCE with reduction='none' for proper focal loss calculation
-        self.bce_fn = nn.BCEWithLogitsLoss(reduction='none', **kwargs)
+        self.bce_fn = nn.BCEWithLogitsLoss(reduction='none')
+        # Use an Onset loss for onset prediction if needed
+        self.onset_loss_fn = nn.SmoothL1Loss(reduction='none')  # might be better than MSE regarding outliers
+        
+        # Per Batch and Per Window loss history for monitoring
+        self.history_presence_loss = deque([], maxlen=5)
+        self.history_onset_loss = deque([], maxlen=5)
     
     def forward(self, predictions, targets, mask=None, **_kwargs):
         """
@@ -74,10 +79,26 @@ class FocalLoss(nn.Module):
         # Log inputs
         # log_tensor_statistics(predictions, "FocalLoss predictions input", logger)
         # log_tensor_statistics(targets, "FocalLoss targets input", logger)
+        if predictions.dim() != targets.dim():
+            raise ValueError(f"Predictions and targets must have the same number of dimensions, got {predictions.dim()} and {targets.dim()}")
+        
+        B, N_s, *_ = predictions.shape
 
+        # Infer if onset prediction is included based on target shape
+        onset_and_prediction = targets.size(-1) == 2
+        if onset_and_prediction:
+            # Split presence and onset targets
+            presence_predictions = predictions[..., 0]
+            presence_targets = targets[..., 0]
+            onset_predictions = torch.sigmoid(predictions[..., 1])  # Onset predictions should be in [0, 1], as targets are
+            onset_targets = targets[..., 1]
+        else:
+            presence_predictions = predictions
+            presence_targets = targets
+        
         # Flatten to (B*N_s) for binary classification
-        predictions_flat = predictions.view(-1)
-        targets_flat = targets.view(-1)
+        predictions_flat = presence_predictions.view(-1)
+        targets_flat = presence_targets.view(-1)
         if mask is not None:
             mask_flat = mask.view(-1)
             n_valid = mask_flat.sum().item()
@@ -94,24 +115,42 @@ class FocalLoss(nn.Module):
         pt = torch.exp(-bce_loss)
         # log_tensor_statistics(pt, "FocalLoss pt", logger)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-        # log_tensor_statistics(focal_loss, "FocalLoss focal_loss (before masking)", logger)
+        # log_tensor_statistics(focal_loss, "FocalLoss focal_loss (before masking)", logger)            
 
         if mask is not None:
-            # Apply mask to focal loss
             focal_loss = focal_loss * mask_flat.float()
+            self.history_presence_loss.append(focal_loss.reshape(B, N_s))
             # log_tensor_statistics(focal_loss, "FocalLoss focal_loss (after masking)", logger)
-                # Avoid division by zero
+            
+            if onset_and_prediction:
+                # Only penalize onset loss when presence should have been predicted
+                onset_loss = self.onset_loss_fn(onset_predictions.view(-1), onset_targets.view(-1)) * presence_targets.view(-1) * mask_flat.float()
+                self.history_onset_loss.append(onset_loss.reshape(B, N_s))
+            
             mask_sum = mask_flat.sum()
             if mask_sum > 0:
                 final_loss = focal_loss.sum() / mask_sum
-                # log_tensor_statistics(final_loss, "FocalLoss final output (masked)", logger)
+                
+                if onset_and_prediction:
+                    onset_loss = onset_loss.sum() / mask_sum
+                    final_loss += onset_loss
+                
                 return final_loss
             else:
                 logger.warning("FocalLoss: All elements masked out, returning 0.0")
                 return torch.tensor(0.0, device=focal_loss.device, dtype=focal_loss.dtype)
+        else:
+            self.history_presence_loss.append(focal_loss.reshape(B, N_s))
+            final_loss = focal_loss.mean()
+            
+            if onset_and_prediction:
+                onset_loss = self.onset_loss_fn(onset_predictions.view(-1), onset_targets.view(-1)) * presence_targets.view(-1)
+                self.history_onset_loss.append(onset_loss.reshape(B, N_s))
+                onset_loss = onset_loss.mean()
+                final_loss += onset_loss
+            
+            return final_loss
 
-        final_loss = focal_loss.mean()
-        return final_loss
 
 class CrossEntropyLoss(nn.Module):
     """Cross entropy loss wrapper for registry compatibility."""

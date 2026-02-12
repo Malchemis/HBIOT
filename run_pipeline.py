@@ -28,7 +28,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from pipeline.utils.config_handler import load_config
 from pipeline.data.datamodule_registry import create_datamodule
 from pipeline.training.lightning_module import MEGSpikeDetector
-from pipeline.training.callback_registry import create_callbacks, MetricsEvaluationCallback
+from pipeline.training.callback_registry import create_callbacks
 
 
 def setup_logging(log_level: str = "INFO", log_file: str = "pipeline.log") -> logging.Logger:
@@ -85,7 +85,6 @@ def setup_ddp_strategy(find_unused_parameters: bool = True):
     Returns:
         DDPStrategy instance if multiple GPUs available, None otherwise.
     """
-    import torch
     logger = logging.getLogger(__name__)
     strategy = None
 
@@ -150,11 +149,12 @@ def find_best_checkpoint(
         return None
 
 
-def main(config_path: str, test_only: bool = False, token_selection_dict: Optional[Dict[str, Any]] = None, n_windows: Optional[int] = None, batch_size: Optional[int] = None):
+def main(config_path: str, resume: bool = False, test_only: bool = False, token_selection_dict: Optional[Dict[str, Any]] = None, n_windows: Optional[int] = None, batch_size: Optional[int] = None):
     """Main training and testing function.
 
     Args:
         config_path: Path to configuration file.
+        resume: If True, resume training from checkpoint. If no checkpoint is specified, the latest checkpoint in the log directory will be used.
         test_only: If True, skip training and only run testing.
         token_selection_dict: Dictionary containing token selection parameters.
         n_windows: Number of windows to use (overrides config if provided).
@@ -244,7 +244,7 @@ def main(config_path: str, test_only: bool = False, token_selection_dict: Option
 
     datamodule.prepare_data()
     datamodule.setup(stage='fit' if not test_only else 'test')
-    input_shape = datamodule.get_input_shape()
+    input_shape = datamodule.get_input_shape() # type: ignore
 
     ckpt_path = experiment_config.get("checkpoint_path", None)
     if ckpt_path:
@@ -301,6 +301,18 @@ def main(config_path: str, test_only: bool = False, token_selection_dict: Option
 
     logger.info("Preparing data...")
     datamodule.prepare_data()
+    
+    if resume:
+        logger.info("Resuming training...")
+        if not ckpt_path:
+            logger.info("No checkpoint specified, searching for latest checkpoint in log directory...")
+            last_ckpt = Path(tb_logger.log_dir) / "last.ckpt"
+            if last_ckpt.exists():
+                ckpt_path = str(last_ckpt)
+                logger.info(f"Resuming from latest checkpoint: {ckpt_path}")
+            else:
+                logger.warning("No latest checkpoint found, starting fresh training")
+            logger.info(f"Best checkpoint found: {ckpt_path}")
 
     if not test_only:
         logger.info("Starting training...")
@@ -324,6 +336,11 @@ if __name__ == "__main__":
         type=str,
         default="configs/default_config.yaml",
         help="Path to configuration file (default: configs/default_config.yaml)"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training, if no checkpoint is specified, the latest checkpoint in the log directory will be used"
     )
     parser.add_argument(
         "--test-only",
@@ -391,4 +408,4 @@ if __name__ == "__main__":
             raise ValueError(f"n_selected_tokens must be non-negative, got: {args.n_selected_tokens}")
         token_selection_dict["n_selected_tokens"] = args.n_selected_tokens
 
-    main(str(config_path), test_only=args.test_only, token_selection_dict=token_selection_dict, n_windows=args.n_windows, batch_size=args.batch_size)
+    main(str(config_path), resume=args.resume, test_only=args.test_only, token_selection_dict=token_selection_dict, n_windows=args.n_windows, batch_size=args.batch_size)
