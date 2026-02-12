@@ -45,7 +45,6 @@ class MEGOnTheFlyDataModule(L.LightningDataModule):
         seed: int = 42,
         prepare_data_per_node: bool = False,
         root_dirs: Optional[List[str]] = None,
-        cache_dir: Optional[str] = None,
         auto_generate_splits: bool = False,
         n_folds: int = 5,
         reference_coordinates: str = "",
@@ -65,7 +64,6 @@ class MEGOnTheFlyDataModule(L.LightningDataModule):
             seed: Random seed for reproducibility.
             prepare_data_per_node: Whether to prepare data per node in DDP.
             root_dirs: Root directories to search for data files.
-            cache_dir: Base directory for caching (optional).
             auto_generate_splits: Whether to automatically generate splits if not found.
             n_folds: Number of folds for cross-validation.
             reference_coordinates: Path to the reference file for channel names.
@@ -82,7 +80,6 @@ class MEGOnTheFlyDataModule(L.LightningDataModule):
         self.fold = fold
         self.seed = seed
         self.root_dirs = root_dirs or []
-        self.cache_dir = cache_dir
         self.auto_generate_splits = auto_generate_splits
         self.n_folds = n_folds
 

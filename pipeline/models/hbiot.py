@@ -106,7 +106,6 @@ class BIOTHierarchicalClassifier(nn.Module):
             token_selection: Optional[dict] = None,
             classifier: Optional[dict] = None,
             n_classes: int = 1,
-            reference_coordinates: Dict[str, List[float]] = None,
             max_virtual_batch_size: int = 640,
             channel_embedding: Optional[dict] = None,
             window_overlap: float = 0.5,
@@ -130,7 +129,6 @@ class BIOTHierarchicalClassifier(nn.Module):
                 Can include 'n_selected_tokens', 'use_cls_token', 'use_mean_pool', 'use_max_pool' keys.
             classifier: Parameters for the classification head.
             n_classes: Number of output classes for classification.
-            reference_coordinates: Dictionary mapping channel names to their spatial coordinates.
             max_virtual_batch_size: Maximum virtual batch size (BxN) to process in a single forward pass. Defaults to 640 = 32x20 (tested empirically on h100 with 80GB RAM).
                 When BxN exceeds this value, processing is done in chunks. Default: 640.
             channel_embedding: Composable channel embedding config with keys:
@@ -150,9 +148,6 @@ class BIOTHierarchicalClassifier(nn.Module):
         assert transformer is not None, "Transformer parameters must be provided."
         assert token_selection is not None, "Token selection parameters must be provided."
         assert classifier is not None, "Classifier parameters must be provided."
-
-        if reference_coordinates is None:
-            reference_coordinates = {}
 
         print(f"Initializing BIOTHierarchicalClassifier with input shape: {input_shape}")
         n_windows, n_channels, n_samples_per_window = input_shape
@@ -193,14 +188,10 @@ class BIOTHierarchicalClassifier(nn.Module):
         # Channel embedding composer: composable strategy (learned, spectral, fourier)
         # Must be created before BIOTEncoder which receives a reference to it.
         channel_emb_config = channel_embedding if channel_embedding is not None else {'learned': {'enabled': True}}
-
-        ref_coords = reference_coordinates if isinstance(reference_coordinates, dict) else None
         self.channel_embedding_composer = ChannelEmbeddingComposer(
             n_channels=n_channels,
             emb_size=emb_size,
             config=channel_emb_config,
-            reference_coordinates=ref_coords,
-            channel_names=None,  # Set later via set_fourier_coordinates() from data module
         )
 
         # Modified BIOT encoder for window-level processing with configurable tokens
@@ -262,22 +253,6 @@ class BIOTHierarchicalClassifier(nn.Module):
             # Single token classification with simple MLP
             from pipeline.models.commons import ClassificationHead
             self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes)
-
-    def set_fourier_coordinates(
-        self,
-        coordinates_dict: Dict[str, List[float]],
-        channel_names: List[str],
-    ) -> None:
-        """Set Fourier spatial coordinates on the channel embedding composer.
-
-        Should be called once channel names are available (e.g. from the data module
-        during setup). Only needed when fourier embedding is enabled in the config.
-
-        Args:
-            coordinates_dict: Mapping from channel name to [x, y, z].
-            channel_names: Ordered list of channel names matching model's channel order.
-        """
-        self.channel_embedding_composer.set_fourier_coordinates(coordinates_dict, channel_names)
 
     def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None,
                 window_mask: Optional[torch.Tensor] = None, unk_augment: float = 0.0,

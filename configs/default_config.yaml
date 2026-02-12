@@ -157,9 +157,6 @@ data:
       - "${root_dir}"
       # - "/additional/data/path"              # Add more if needed
 
-    # Optional cache directory (legacy, use preprocessed_dir instead)
-    cache_dir: "${data_dir}/meg_preprocessing"
-
     # Reference channel coordinates file (pickle format)
     reference_coordinates: "${reference_channels}"
 
