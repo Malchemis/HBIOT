@@ -10,10 +10,13 @@ import os
 import re
 import logging
 import random
+import warnings
 import numpy as np
 import torch
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 torch.set_float32_matmul_precision('high')
+warnings.filterwarnings("ignore", message=".*AccumulateGrad node's stream.*")
+warnings.filterwarnings("ignore", message=".*Memory Efficient attention defaults to a non-deterministic algorithm.*")
 import argparse
 import lightning as L
 from pathlib import Path
