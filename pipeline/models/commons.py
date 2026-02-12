@@ -11,8 +11,8 @@ These components are used across different model architectures (BIOT, HBIOT, etc
 
 import logging
 import math
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+import pickle
 
 import numpy as np
 import torch
@@ -819,6 +819,8 @@ class FourierSpatialEmbedding(nn.Module):
         coordinate_dim: int = 3,
         learnable_linear: bool = True,
         augmentation_noise_std: float = 0.0,
+        channel_order: List[str] = [],
+        coordinates_dict: Dict[str, List[float]] = {},
     ):
         super().__init__()
         self.n_frequencies = n_frequencies
@@ -848,7 +850,7 @@ class FourierSpatialEmbedding(nn.Module):
         self.register_buffer('freq_bands', freq_bands)
 
         # Coordinate buffer — set via set_coordinates()
-        self.register_buffer('coordinates', torch.empty(0))
+        self.register_buffer('coordinates', self.set_coordinates(coordinates_dict, channel_order))
 
         self.logger.info(
             f"Initialized FourierSpatialEmbedding: n_frequencies={n_frequencies}, "
@@ -861,7 +863,7 @@ class FourierSpatialEmbedding(nn.Module):
         self,
         coordinates_dict: Dict[str, List[float]],
         channel_order: List[str],
-    ) -> None:
+    ) -> torch.Tensor:
         """Set the 3D coordinates tensor from a dictionary.
 
         Args:
@@ -876,11 +878,11 @@ class FourierSpatialEmbedding(nn.Module):
                 coord_vals = coordinates_dict[ch_name][:self.coordinate_dim]
                 coords[i] = torch.tensor(coord_vals, dtype=torch.float32)
                 n_found += 1
-        self.coordinates = coords.to(self.freq_bands.device)
         self.logger.info(
             f"Set coordinates for {n_found}/{C} channels "
             f"(range: [{coords.min():.4f}, {coords.max():.4f}])"
         )
+        return coords
 
     def _fourier_encode(self, coords: torch.Tensor) -> torch.Tensor:
         """Compute Fourier encoding of coordinates.
@@ -955,8 +957,6 @@ class ChannelEmbeddingComposer(nn.Module):
         n_channels: int,
         emb_size: int,
         config: Dict[str, Any],
-        reference_coordinates: Optional[Dict[str, List[float]]] = None,
-        channel_names: Optional[List[str]] = None,
     ):
         super().__init__()
         self.emb_size = emb_size
@@ -986,22 +986,20 @@ class ChannelEmbeddingComposer(nn.Module):
         if self.use_fourier:
             fourier_params = {
                 k: v for k, v in fourier_cfg.items()
-                if k not in ('enabled', 'spatial_coordinates_path')
+                if k not in ('enabled', 'spatial_coordinates_path', 'channel_order')
             }
+            
+            channel_order_path = fourier_cfg.get('channel_order')
+            channel_loc_path = fourier_cfg.get('spatial_coordinates_path')
+            with open(channel_order_path, 'rb') as f:
+                channel_order = pickle.load(f)
+                fourier_params['channel_order'] = channel_order
+            
+            with open(channel_loc_path, 'rb') as f:            
+                coordinates_dict = pickle.load(f)
+                fourier_params['coordinates_dict'] = coordinates_dict
+            
             self.fourier_module = FourierSpatialEmbedding(emb_size=emb_size, **fourier_params)
-
-            # Load coordinates from path if not provided directly
-            spatial_path = fourier_cfg.get('spatial_coordinates_path')
-            if reference_coordinates is None and spatial_path is not None:
-                import pickle
-                spatial_path = Path(spatial_path) if not isinstance(spatial_path, Path) else spatial_path
-                with open(spatial_path, 'rb') as f:
-                    reference_coordinates = pickle.load(f)
-                self.logger.info(f"Loaded spatial coordinates from {spatial_path}")
-
-            if reference_coordinates is not None and channel_names is not None:
-                self.fourier_module.set_coordinates(reference_coordinates, channel_names)
-            self._fourier_reference_coordinates = reference_coordinates
             self.strategies.append('fourier')
 
         # Special token embeddings (always present for masking)
@@ -1015,26 +1013,6 @@ class ChannelEmbeddingComposer(nn.Module):
             )
 
         self.logger.info(f"ChannelEmbeddingComposer strategies: {self.strategies}")
-
-    def set_fourier_coordinates(
-        self,
-        coordinates_dict: Dict[str, List[float]],
-        channel_names: List[str],
-    ) -> None:
-        """Set Fourier spatial coordinates after initialization.
-
-        Call this once channel names are known (e.g. from the data module).
-
-        Args:
-            coordinates_dict: Mapping from channel name to [x, y, z].
-            channel_names: Ordered list of channel names.
-        """
-        if self.fourier_module is None:
-            raise RuntimeError(
-                "Cannot set Fourier coordinates: fourier strategy is not enabled."
-            )
-        self.fourier_module.set_coordinates(coordinates_dict, channel_names)
-        self._fourier_reference_coordinates = coordinates_dict
 
     def compute_spectral_embeddings(
         self,
