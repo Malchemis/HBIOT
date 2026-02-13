@@ -63,6 +63,7 @@ from pipeline.data.preprocessing.file_manager import get_patient_group
 from pipeline.data.preprocessing.segmentation import (
     create_chunks,
     extract_random_chunk,
+    extract_spike_centered_chunk,
 )
 from pipeline.data.preprocessing.signal_processing import load_and_process_meg_data, augment_data, find_gfp_peak_in_window
 from pipeline.data.preprocessing.annotation import compile_annotation_patterns, get_spike_annotations
@@ -549,11 +550,32 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
             self.logger.info(f"Test dataset size: {total_chunks} chunks ({total_windows} windows) "
                            f"from {len(self.recordings)} recordings (exhaustive sequential extraction)")
         else:
-            self.chunks_per_recording = [self.samples_per_recording for _ in self.recordings]
+            spike_aware = self.config.get('spike_aware_training', False)
+
+            if spike_aware:
+                # Spike subjects: one chunk per spike. Controls: samples_per_recording random chunks.
+                n_spike_recs = 0
+                n_control_recs = 0
+                for meg_data, spike_samples, metadata, channel_info in self.recordings:
+                    n_spikes = len(spike_samples)
+                    if n_spikes > 0:
+                        self.chunks_per_recording.append(n_spikes)
+                        n_spike_recs += 1
+                    else:
+                        self.chunks_per_recording.append(self.samples_per_recording)
+                        n_control_recs += 1
+                self.logger.info(
+                    f"Spike-aware training: {n_spike_recs} spike recordings "
+                    f"({sum(c for c, (_, sp, _, _) in zip(self.chunks_per_recording, self.recordings) if len(sp) > 0)} spike chunks), "
+                    f"{n_control_recs} control recordings "
+                    f"({n_control_recs * self.samples_per_recording} random chunks)"
+                )
+            else:
+                self.chunks_per_recording = [self.samples_per_recording for _ in self.recordings]
+
             self.cumulative_chunks = np.cumsum([0] + self.chunks_per_recording)
 
-            self.logger.info(f"Train dataset size: {len(self)} chunks ({len(self.recordings)} recordings x "
-                           f"{self.samples_per_recording} random samples)")
+            self.logger.info(f"Train dataset size: {len(self)} chunks from {len(self.recordings)} recordings")
 
     def __len__(self) -> int:
         """Return total number of chunks."""
@@ -641,14 +663,28 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
                 'extraction_mode': 'sequential',
             }
         else:
-            # Training mode: Random extraction for temporal diversity
-            # Different position each time this recording is sampled
-            windows, labels, chunk_meta = extract_random_chunk(
-                meg_data,
-                spike_samples.tolist(),
-                self.config,
-                seed=None  # Fully random
-            )
+            # Training mode: extraction strategy depends on spike content
+            spike_list = spike_samples.tolist() if hasattr(spike_samples, 'tolist') else list(spike_samples)
+            spike_aware = self.config.get('spike_aware_training', False)
+
+            if spike_aware and len(spike_list) > 0:
+                # Spike subject: each local_chunk_idx maps to a specific spike
+                target_spike = spike_list[int(local_chunk_idx) % len(spike_list)]
+                windows, labels, chunk_meta = extract_spike_centered_chunk(
+                    meg_data,
+                    spike_list,
+                    target_spike,
+                    self.config,
+                    seed=None,
+                )
+            else:
+                # Control subject or spike-aware disabled: random extraction
+                windows, labels, chunk_meta = extract_random_chunk(
+                    meg_data,
+                    spike_list,
+                    self.config,
+                    seed=None,
+                )
 
             # Apply augmentation (training only)
             windows = augment_data(windows, self.config.get('noise_level', 0.01))

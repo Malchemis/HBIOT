@@ -1,6 +1,7 @@
 """Signal processing operations for MEG data."""
 
 import logging
+import warnings
 from typing import List, Dict, Any, Tuple, Optional
 
 import os
@@ -11,6 +12,7 @@ from scipy.ndimage import median_filter
 import mne
 from mne.io.base import BaseRaw
 from scipy import stats
+from scipy.stats import zscore
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,23 @@ def log_array_statistics(array: np.ndarray, name: str, logger_obj: Optional[logg
     if n_nan == 0 and n_inf == 0:
         logger_obj.debug(f"OK {name}: shape={array.shape}, mean={array.mean():.4f}, std={array.std():.4f}, "
                         f"min={array.min():.4f}, max={array.max():.4f}, NaN=0, Inf=0")
+
+
+def apply_standard_filters(raw: BaseRaw, config: Dict[str, Any]) -> None:
+    """Apply the standard resampling, bandpass, and notch filters in-place.
+
+    Args:
+        raw: MNE Raw object (modified in-place).
+        config: Configuration dictionary with keys ``sampling_rate``,
+            ``l_freq``, ``h_freq``, and ``notch_freq``.
+    """
+    if raw.info['sfreq'] != config['sampling_rate']:
+        raw.resample(sfreq=config['sampling_rate'])
+    raw.filter(l_freq=config.get('l_freq', 0.5), h_freq=config.get('h_freq', 95.0))
+
+    if config.get('notch_freq', 50.0) > 0:
+        freqs = np.arange(config['notch_freq'], config['sampling_rate'] / 2, config['notch_freq']).tolist()
+        raw.notch_filter(freqs=freqs)
 
 
 def load_and_process_meg_data(
@@ -85,6 +104,15 @@ def load_and_process_meg_data(
         else:
             raise ValueError("Unsupported file type for subject path.")
 
+        bad_channel_cfg = config.get('auto_bad_channel_detection')
+        if bad_channel_cfg and bad_channel_cfg.get('enabled', False):
+            threshold = bad_channel_cfg.get('threshold', 3.0)
+            for method in ['noisy', 'flat', 'correlation']:
+                raw = detect_bad_channels_auto(raw, method=method, threshold=threshold, copy=False, verbose=True)
+            if raw.info['bads']:
+                logger.info(f"Auto-detected {len(raw.info['bads'])} bad channels, excluding them")
+                raw.pick(exclude='bads')
+
         # Special case handling for specific file patterns
         for pattern, channels in config.get('special_case_handling', {}).items():
             if pattern in file_path:
@@ -93,23 +121,17 @@ def load_and_process_meg_data(
                 if channels_to_drop:
                     raw.drop_channels(channels_to_drop)
                     logger.info(f"Dropped {len(channels_to_drop)} special case channels for pattern '{pattern}'")
-        
+
         if good_channels is None:
             good_channels = list(raw.ch_names)  # Use all available channels if no reference provided
             logger.info(f"No good_channels provided, using all {len(good_channels)} available channels")
-        
+
         # Select channels based on good channels and location information
         raw, channel_info = select_channels(raw, good_channels)
-        
+
         # Resample and filter
-        if raw.info['sfreq'] != config['sampling_rate']:
-            raw.resample(sfreq=config['sampling_rate'])
-        raw.filter(l_freq=config.get('l_freq', 0.5), h_freq=config.get('h_freq', 95.0))
-        
-        if config.get('notch_freq', 50.0) > 0:
-            freqs = np.arange(config['notch_freq'], config['sampling_rate']/2, config['notch_freq']).tolist()
-            raw.notch_filter(freqs=freqs)
-        
+        apply_standard_filters(raw, config)
+
         # Get raw data from MNE (in order of selected_channels)
         raw_data = np.array(raw.get_data())  # Shape: (n_selected_channels, n_timepoints)
         n_timepoints = raw_data.shape[1]
@@ -357,3 +379,177 @@ def find_gfp_peak_in_window(
     peak_time = peak_sample / sampling_rate
     
     return int(peak_sample), float(peak_time)
+
+
+def identify_active_channels(
+    epoch_data: np.ndarray,
+    threshold_zscore: float = 2.5,
+    top_k: Optional[int] = None,
+) -> np.ndarray:
+    """Identify channels with high peak-to-peak amplitude in an epoch.
+
+    Args:
+        epoch_data: Single epoch data of shape (n_channels, n_times).
+        threshold_zscore: Z-score threshold for peak amplitude to consider a channel active.
+        top_k: If set, return the top_k channels by z-score regardless of threshold.
+
+    Returns:
+        Array of indices of active channels.
+    """
+    ptp = np.ptp(epoch_data, axis=1)
+    ptp_z = zscore(ptp)
+
+    if top_k is not None:
+        return np.argsort(ptp_z)[-top_k:]
+
+    active_mask = ptp_z > threshold_zscore
+    if not np.any(active_mask):
+        warnings.warn(
+            f"No channel above z-score threshold {threshold_zscore}, "
+            f"max z-score: {ptp_z.max():.2f}"
+        )
+    return np.where(active_mask)[0]
+
+
+def filter_spikes_by_channel_activity(
+    meg_data: np.ndarray,
+    spike_onsets_seconds: List[float],
+    sampling_rate: float,
+    epoch_half_duration_s: float = 0.05,
+    threshold_zscore: float = 2.5,
+    min_active_channels: int = 5,
+) -> Tuple[List[float], List[float], Dict[str, Any]]:
+    """Filter spikes, keeping only those with activity in enough channels.
+
+    For each spike, extracts a short epoch around the onset, computes
+    per-channel peak-to-peak amplitude z-scores, and keeps the spike only
+    if at least ``min_active_channels`` exceed the z-score threshold.
+
+    Args:
+        meg_data: Preprocessed MEG data of shape (n_channels, n_samples).
+        spike_onsets_seconds: Spike onset times in seconds.
+        sampling_rate: Sampling rate in Hz.
+        epoch_half_duration_s: Half-window duration around spike for PTP calculation.
+        threshold_zscore: Z-score threshold for active channel detection.
+        min_active_channels: Minimum number of active channels to keep a spike.
+
+    Returns:
+        Tuple of (kept_onsets, rejected_onsets, stats_dict) where onsets are in seconds.
+    """
+    n_samples = meg_data.shape[1]
+    half_samples = int(epoch_half_duration_s * sampling_rate)
+
+    kept = []
+    rejected = []
+    active_counts = []
+
+    for onset_s in spike_onsets_seconds:
+        onset_sample = int(onset_s * sampling_rate)
+        start = max(0, onset_sample - half_samples)
+        end = min(n_samples, onset_sample + half_samples)
+
+        if end - start < 2:
+            rejected.append(onset_s)
+            active_counts.append(0)
+            continue
+
+        epoch = meg_data[:, start:end]
+        active_idx = identify_active_channels(epoch, threshold_zscore=threshold_zscore)
+        n_active = len(active_idx)
+        active_counts.append(n_active)
+
+        if n_active >= min_active_channels:
+            kept.append(onset_s)
+        else:
+            rejected.append(onset_s)
+
+    filter_stats = {
+        'total_spikes': len(spike_onsets_seconds),
+        'kept_spikes': len(kept),
+        'rejected_spikes': len(rejected),
+        'rejection_rate': len(rejected) / max(len(spike_onsets_seconds), 1),
+        'active_channel_counts': active_counts,
+        'threshold_zscore': threshold_zscore,
+        'min_active_channels': min_active_channels,
+    }
+
+    return kept, rejected, filter_stats
+
+
+def detect_bad_channels_auto(raw: BaseRaw,
+                             method: str = 'noisy',
+                             threshold: float = 3.0,
+                             copy: bool = True,
+                             verbose: bool = False) -> BaseRaw:
+    """
+    Automatically detect bad channels based on statistical criteria.
+
+    Parameters
+    ----------
+    raw : mne.io.BaseRaw
+        BaseRaw MEG data.
+    method : str
+        Detection method: 'noisy' (high variance), 'flat' (low variance),
+        or 'correlation' (low correlation with neighbors).
+    threshold : float
+        Z-score threshold for marking channels as bad.
+    copy : bool
+        If True, operate on a copy.
+    verbose : bool
+        If True, print detected bad channels.
+
+    Returns
+    -------
+    raw : mne.io.BaseRaw
+        BaseRaw data with bad channels marked.
+
+    Notes
+    -----
+    Marked bad channels are stored in raw.info['bads'] but not removed.
+    Use raw.interpolate_bads() to interpolate them.
+    """
+    if copy:
+        raw = raw.copy()
+
+    # Get MEG channel data
+    picks = mne.pick_types(raw.info, meg=True)
+    data = raw.get_data(picks=picks)
+    ch_names = [raw.ch_names[i] for i in picks]
+
+    if method == 'noisy':
+        # Detect channels with high variance
+        variances = np.var(data, axis=1)
+        z_scores = (variances - np.mean(variances)) / np.std(variances)
+        bad_idx = np.where(z_scores > threshold)[0]
+        bad_channels = [ch_names[i] for i in bad_idx]
+
+    elif method == 'flat':
+        # Detect channels with low variance
+        variances = np.var(data, axis=1)
+        z_scores = (np.mean(variances) - variances) / np.std(variances)
+        bad_idx = np.where(z_scores > threshold)[0]
+        bad_channels = [ch_names[i] for i in bad_idx]
+
+    elif method == 'correlation':
+        # Detect channels with low correlation to neighbors
+        corr_matrix = np.corrcoef(data)
+        mean_corr = np.mean(corr_matrix, axis=1)
+        z_scores = (np.mean(mean_corr) - mean_corr) / np.std(mean_corr)
+        bad_idx = np.where(z_scores > threshold)[0]
+        bad_channels = [ch_names[i] for i in bad_idx]
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    # Mark bad channels
+    raw.info['bads'].extend(bad_channels)
+    raw.info['bads'] = list(set(raw.info['bads']))  # Remove duplicates
+
+    if verbose:
+        logger.info(f"Bad channel detection ({method}):")
+        logger.info(f"  Detected {len(bad_channels)} bad channels")
+        if bad_channels:
+            logger.info(f"  Channels: {', '.join(bad_channels[:10])}" +
+                        (f" ... (and {len(bad_channels) - 10} more)" if len(bad_channels) > 10 else ""))
+
+    return raw

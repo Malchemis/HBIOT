@@ -19,7 +19,10 @@ from tqdm import tqdm
 
 from pipeline.data.preprocessing.annotation import compile_annotation_patterns, get_spike_annotations
 from pipeline.data.preprocessing.file_manager import get_patient_group
-from pipeline.data.preprocessing.signal_processing import load_and_process_meg_data
+from pipeline.data.preprocessing.signal_processing import (
+    filter_spikes_by_channel_activity,
+    load_and_process_meg_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ def compute_config_hash(config: Dict[str, Any]) -> str:
         'normalization': config.get('normalization'),
         'median_filter_temporal_window_ms': config.get('median_filter_temporal_window_ms'),
         'special_case_handling': config.get('special_case_handling'),
+        'spike_quality_filtering': config.get('spike_quality_filtering'),
     }
 
     config_str = json.dumps(preprocessing_params, sort_keys=True)
@@ -113,6 +117,25 @@ def preprocess_recording(
     raw.close()
 
     spike_samples = np.array([int(onset * sampling_rate) for onset in spike_onsets], dtype=np.int64)
+    n_raw_spikes = len(spike_samples)
+
+    # Optional per-spike quality filtering
+    sq = config.get('spike_quality_filtering', {})
+    spike_filter_stats = None
+    if sq.get('enabled', False) and len(spike_onsets) > 0:
+        kept_onsets, rejected_onsets, spike_filter_stats = filter_spikes_by_channel_activity(
+            meg_data,
+            spike_onsets,
+            sampling_rate,
+            epoch_half_duration_s=sq.get('epoch_half_duration_s', 0.05),
+            threshold_zscore=sq.get('threshold_zscore', 2.5),
+            min_active_channels=sq.get('min_active_channels', 5),
+        )
+        spike_samples = np.array([int(o * sampling_rate) for o in kept_onsets], dtype=np.int64)
+        logger.debug(
+            f"Spike quality filter: {n_raw_spikes} -> {len(spike_samples)} spikes "
+            f"({n_raw_spikes - len(spike_samples)} rejected)"
+        )
 
     metadata = {
         'file_name': file_path,
@@ -121,8 +144,10 @@ def preprocess_recording(
         'group': group,
         'sampling_rate': float(sampling_rate),
         'n_samples': int(meg_data.shape[1]),
+        'n_raw_spikes': n_raw_spikes,
         'n_spikes_in_recording': len(spike_samples),
         'duration_s': float(meg_data.shape[1] / sampling_rate),
+        'spike_quality_filter': spike_filter_stats,
         'preprocessing_config': {
             'sampling_rate': config['sampling_rate'],
             'l_freq': config.get('l_freq', 0.5),

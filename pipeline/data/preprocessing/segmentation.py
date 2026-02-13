@@ -214,6 +214,84 @@ def extract_random_chunk(
     return windows, labels, metadata
 
 
+def extract_spike_centered_chunk(
+    meg_data: np.ndarray,
+    spike_samples: List[int],
+    target_spike: int,
+    config: Dict[str, Any],
+    seed: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Extract a chunk guaranteed to contain a specific spike.
+
+    The chunk onset is randomized so the target spike appears at a different
+    position each time, giving the model varied temporal context.
+
+    Args:
+        meg_data: MEG data array (n_channels, n_samples).
+        spike_samples: All spike sample indices in the recording.
+        target_spike: The spike sample index this chunk must contain.
+        config: Dataset configuration (same keys as ``extract_random_chunk``).
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Same as ``extract_random_chunk``: (windows, labels, metadata).
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    recording_length = meg_data.shape[1]
+    chunk_duration = calculate_chunk_duration(config)
+    window_duration_samples = int(config['window_duration_s'] * config['sampling_rate'])
+    margin = window_duration_samples // 2
+
+    # Valid onset range that keeps the target spike inside the chunk
+    earliest_onset = max(0, target_spike - chunk_duration + margin)
+    latest_onset = min(recording_length - chunk_duration, target_spike - margin)
+
+    if latest_onset < earliest_onset:
+        # Very short recording or spike near boundary — best effort
+        onset = max(0, min(target_spike - chunk_duration // 2,
+                           recording_length - chunk_duration))
+        onset = max(0, onset)
+    else:
+        onset = random.randint(earliest_onset, latest_onset)
+
+    offset = min(onset + chunk_duration, recording_length)
+
+    # Extract chunk
+    chunk_meg = meg_data[:, onset:offset]
+    chunk_spikes = [s - onset for s in spike_samples if onset <= s < offset]
+
+    # Create windows and labels
+    windows = create_windows(
+        chunk_meg,
+        config['sampling_rate'],
+        config['window_duration_s'],
+        config.get('window_overlap', 0.0),
+    )
+
+    labels = calculate_window_labels_from_spikes(windows, chunk_spikes, config)
+
+    window_overlap = config.get('window_overlap', 0.0)
+    window_step = max(1, int(window_duration_samples * (1 - window_overlap)))
+    start_window_idx = onset // window_step if window_step > 0 else 0
+
+    metadata = {
+        'chunk_onset_sample': onset,
+        'chunk_offset_sample': offset,
+        'chunk_duration_samples': offset - onset,
+        'start_window_idx': start_window_idx,
+        'end_window_idx': start_window_idx + len(windows),
+        'n_windows': len(windows),
+        'n_spikes_in_chunk': len(chunk_spikes),
+        'spike_positions_in_chunk': chunk_spikes,
+        'extraction_mode': 'spike_centered',
+        'target_spike_sample': target_spike,
+    }
+
+    return windows, labels, metadata
+
+
 def calculate_window_labels_from_spikes(
     windows: np.ndarray,
     spike_positions: List[int],

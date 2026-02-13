@@ -277,11 +277,31 @@ data:
       predict_event_onset: false              # Predict spike onset in addition to presence
 
       # ----------------------------------------------------------------------
+      # Spike-Aware Training
+      # ----------------------------------------------------------------------
+      # When enabled, spike subjects produce one chunk per spike (centered on it).
+      # Control subjects (0 spikes) keep random extraction as usual.
+      spike_aware_training: true              # Enable spike-centered chunk extraction
+
+      # Per-spike quality filtering at preprocessing time (HDF5 cache)
+      spike_quality_filtering:
+        enabled: true                         # Filter spikes by multi-channel activity
+        threshold_zscore: 2.5                 # Z-score threshold for active channels
+        min_active_channels: 5                # Minimum active channels to keep a spike
+        epoch_half_duration_s: 0.05           # Half-window around spike for PTP calc
+
+      # ----------------------------------------------------------------------
       # Signal Processing Pipeline
       # ----------------------------------------------------------------------
       # Applied in this order:
-      # 1. Load raw data → 2. Bandpass filter → 3. Notch filter →
-      # 4. Normalize → 5. Median filter (optional)
+      # 1. Load raw data → 2. Auto bad channel detection (optional) →
+      # 3. Bandpass filter → 4. Notch filter →
+      # 5. Normalize → 6. Median filter (optional)
+
+      # Automatic bad channel detection (variance / flatness / correlation)
+      auto_bad_channel_detection:
+        enabled: false                          # Enable automatic bad channel detection
+        threshold: 3.0                          # Z-score threshold for marking channels as bad
 
       l_freq: 1.0                             # High-pass filter cutoff (Hz)
       h_freq: 99.0                            # Low-pass filter cutoff (Hz)

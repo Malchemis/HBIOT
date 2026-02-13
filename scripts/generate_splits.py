@@ -3,6 +3,10 @@
 This script creates stratified K-fold cross-validation splits ensuring balanced distribution
 of spike counts across folds. It separates a test set (holdout patients) from the train/val pool,
 then generates stratified folds based on spike count distributions.
+
+Supports optional quality filtering:
+- Per-spike filtering based on multi-channel activity (reject low-channel-count spikes)
+- Subject-level filtering based on spike rate (remove subjects with suspiciously low rates)
 """
 import json
 import os
@@ -21,6 +25,8 @@ from tqdm import tqdm
 
 from pipeline.data.preprocessing.annotation import get_spike_annotations, compile_annotation_patterns
 from pipeline.data.preprocessing.file_manager import find_ds_files
+from pipeline.data.preprocessing.filtering_stats import FilteringStatistics
+from pipeline.data.preprocessing.signal_processing import apply_standard_filters, filter_spikes_by_channel_activity
 from pipeline.utils.config_handler import load_config
 
 
@@ -55,17 +61,33 @@ def setup_logging(log_level: str = "INFO", log_file: str = "generate_splits.log"
         force=True
     )
 
-def load_meg_data_and_count_spikes(file_path: str, patient_group: str, annotation_rules: Dict[str, Any]) -> int:
-    """Load MEG data and count valid spike annotations.
-    
+def load_meg_data_and_count_spikes(
+    file_path: str,
+    patient_group: str,
+    annotation_rules: Dict[str, Any],
+    spike_quality_config: Optional[Dict[str, Any]] = None,
+    preprocessing_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Load MEG data, count valid spike annotations, and optionally filter by quality.
+
     Args:
-        file_path: Path to the .ds file
-        patient_group: Patient group for annotation rules
-        annotation_rules: Dictionary containing annotation rules for each group
+        file_path: Path to the MEG file (.ds, .fif, or BTi directory).
+        patient_group: Patient group for annotation rules.
+        annotation_rules: Dictionary containing annotation rules for each group.
+        spike_quality_config: Optional config for per-spike quality filtering.
+            Keys: enabled, threshold_zscore, min_active_channels, epoch_half_duration_s.
+        preprocessing_config: Optional config with ``sampling_rate``, ``l_freq``,
+            ``h_freq``, ``notch_freq``. Required when spike_quality_config is enabled.
 
     Returns:
-        Number of valid spike annotations in the file
+        Dictionary with keys:
+            - spike_count: Raw spike count (before quality filtering).
+            - filtered_spike_count: Spike count after quality filtering (equals spike_count if disabled).
+            - duration_s: Recording duration in seconds.
+            - filter_stats: Per-spike filtering statistics (None if disabled).
     """
+    result = {'spike_count': 0, 'filtered_spike_count': 0, 'duration_s': 0.0, 'filter_stats': None}
+
     try:
         if ".ds" in file_path:
             raw = mne.io.read_raw_ctf(file_path, preload=False).pick(picks=['meg'], exclude='bads').load_data()
@@ -90,63 +112,109 @@ def load_meg_data_and_count_spikes(file_path: str, patient_group: str, annotatio
             ).pick(picks=['meg'], exclude='bads').load_data()
         else:
             raise ValueError("Unsupported file type for subject path.")
-            
+
+        result['duration_s'] = raw.n_times / raw.info['sfreq']
+
         # Extract annotations
         annotations = raw.annotations
         if annotations is None or len(annotations) == 0:
-            return 0
-            
+            return result
+
         # Get spike annotations using the annotation processor
         spike_onsets = get_spike_annotations(annotations, patient_group, annotation_rules)
-        return len(spike_onsets)
-        
+        result['spike_count'] = len(spike_onsets)
+        result['filtered_spike_count'] = len(spike_onsets)
+
+        # Optional per-spike quality filtering
+        sq = spike_quality_config or {}
+        if sq.get('enabled', False) and len(spike_onsets) > 0:
+            # Apply the same preprocessing pipeline used during caching
+            apply_standard_filters(raw, preprocessing_config)
+
+            meg_data = raw.get_data()
+            kept, rejected, fstats = filter_spikes_by_channel_activity(
+                meg_data,
+                spike_onsets,
+                raw.info['sfreq'],
+                epoch_half_duration_s=sq.get('epoch_half_duration_s', 0.05),
+                threshold_zscore=sq.get('threshold_zscore', 2.5),
+                min_active_channels=sq.get('min_active_channels', 5),
+            )
+            result['filtered_spike_count'] = len(kept)
+            result['filter_stats'] = fstats
+
+        return result
+
     except Exception as e:
         logger.warning(f"Error processing {file_path}: {e}")
-        return 0
+        return result
 
 
-def generate_patient_spike_statistics(ds_files: List[Dict], patient_groups: Dict[str, str], annotation_rules: Dict[str, Any]) -> Dict[str, Dict]:
+def generate_patient_spike_statistics(
+    ds_files: List[Dict],
+    patient_groups: Dict[str, str],
+    annotation_rules: Dict[str, Any],
+    spike_quality_config: Optional[Dict[str, Any]] = None,
+    preprocessing_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict]:
     """Generate spike statistics for each patient.
-    
+
     Args:
-        ds_files: List of file dictionaries with metadata
-        patient_groups: Dictionary mapping patient IDs to groups
-        annotation_rules: Dictionary containing annotation rules for each group
+        ds_files: List of file dictionaries with metadata.
+        patient_groups: Dictionary mapping patient IDs to groups.
+        annotation_rules: Dictionary containing annotation rules for each group.
+        spike_quality_config: Optional config for per-spike quality filtering.
+        preprocessing_config: Optional config for standard signal processing.
 
     Returns:
-        Dictionary with patient statistics
+        Dictionary with patient statistics including duration and filtered spike counts.
     """
     logger.info("Analyzing spike statistics for all patients...")
-    
+
     # Group files by patient
     patient_files = defaultdict(list)
     for file_info in ds_files:
         patient_id = file_info['patient_id']
         patient_files[patient_id].append(file_info)
-    
+
     patient_stats = {}
-    
+
     for patient_id, files in tqdm(patient_files.items(), desc="Processing patients"):
         patient_group = patient_groups[patient_id]
         total_spikes = 0
+        total_filtered_spikes = 0
+        total_duration_s = 0.0
         file_count = len(files)
-        
+
         for file_info in files:
             file_path = file_info['path']
-            spike_count = load_meg_data_and_count_spikes(
-                file_path, patient_group, annotation_rules
+            file_result = load_meg_data_and_count_spikes(
+                file_path, patient_group, annotation_rules,
+                spike_quality_config, preprocessing_config,
             )
-            total_spikes += spike_count
-        
+            total_spikes += file_result['spike_count']
+            total_filtered_spikes += file_result['filtered_spike_count']
+            total_duration_s += file_result['duration_s']
+
+        total_duration_min = total_duration_s / 60.0
+        spikes_per_minute = total_filtered_spikes / max(total_duration_min, 1e-6)
+
         patient_stats[patient_id] = {
             'group': patient_group,
             'total_spikes': total_spikes,
+            'total_filtered_spikes': total_filtered_spikes,
+            'total_duration_s': total_duration_s,
+            'spikes_per_minute': spikes_per_minute,
             'file_count': file_count,
-            'files': [f['path'] for f in files]
+            'files': [f['path'] for f in files],
         }
-        
-        logger.debug(f"Patient {patient_id} ({patient_group}): {total_spikes} spikes across {file_count} files")
-    
+
+        logger.debug(
+            f"Patient {patient_id} ({patient_group}): "
+            f"{total_spikes} raw spikes, {total_filtered_spikes} filtered spikes, "
+            f"{total_duration_min:.1f} min, {spikes_per_minute:.2f} spikes/min"
+        )
+
     return patient_stats
 
 
@@ -194,8 +262,11 @@ def generate_stratified_splits(train_val_patients: List[str], patient_stats: Dic
     if len(train_val_patients) < n_splits:
         raise ValueError(f"Cannot create {n_splits} folds with only {len(train_val_patients)} patients")
     
-    # Extract spike counts for stratification
-    spike_counts = [patient_stats[patient_id]['total_spikes'] for patient_id in train_val_patients]
+    # Extract spike counts for stratification (use filtered counts if available)
+    spike_counts = [
+        patient_stats[patient_id].get('total_filtered_spikes', patient_stats[patient_id]['total_spikes'])
+        for patient_id in train_val_patients
+    ]
     
     # Create stratification bins
     stratification_bins = create_stratification_bins(spike_counts, n_bins=min(5, len(train_val_patients)))
@@ -368,12 +439,89 @@ def split_patients_by_group(patient_groups: Dict[str, str]) -> Tuple[List[str], 
     return train_val_patients, test_patients
 
 
+def filter_low_spike_rate_subjects(
+    patient_stats: Dict[str, Dict],
+    train_val_patients: List[str],
+    test_patients: List[str],
+    min_spikes_per_minute: float = 0.5,
+    protect_groups: Optional[List[str]] = None,
+) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """Remove subjects with suspiciously low spike rates from train/val pool.
+
+    Subjects with 0 spikes (controls) are KEPT — they are legitimate negatives.
+    Subjects with 0 < spikes_per_minute < threshold are REMOVED as unreliable.
+    Test/holdout subjects and protected groups are never removed.
+
+    Args:
+        patient_stats: Patient statistics (must include 'total_filtered_spikes', 'spikes_per_minute').
+        train_val_patients: List of train/val patient IDs.
+        test_patients: List of test patient IDs (never filtered).
+        min_spikes_per_minute: Minimum spike rate to keep a spike-positive subject.
+        protect_groups: List of group names that are never filtered.
+
+    Returns:
+        Tuple of (filtered_train_val, removed_patients, stats_dict).
+    """
+    protect_groups = set(protect_groups or [])
+    test_set = set(test_patients)
+
+    filtered = []
+    removed = []
+    removed_details = []
+
+    for patient_id in train_val_patients:
+        stats = patient_stats[patient_id]
+        n_spikes = stats['total_filtered_spikes']
+        rate = stats['spikes_per_minute']
+        group = stats['group']
+
+        # Never filter test subjects or protected groups
+        if patient_id in test_set or group in protect_groups:
+            filtered.append(patient_id)
+            continue
+
+        # Keep controls (0 spikes) — they are legitimate negatives
+        if n_spikes == 0:
+            filtered.append(patient_id)
+            continue
+
+        # Remove subjects with low but non-zero spike rate
+        if rate < min_spikes_per_minute:
+            removed.append(patient_id)
+            removed_details.append({
+                'patient_id': patient_id,
+                'group': group,
+                'spikes': n_spikes,
+                'spikes_per_minute': round(rate, 4),
+                'duration_min': round(stats['total_duration_s'] / 60, 1),
+            })
+            continue
+
+        filtered.append(patient_id)
+
+    filter_stats = {
+        'subjects_before': len(train_val_patients),
+        'subjects_after': len(filtered),
+        'subjects_removed': len(removed),
+        'min_spikes_per_minute_threshold': min_spikes_per_minute,
+        'removed_details': removed_details,
+    }
+
+    return filtered, removed, filter_stats
+
+
 def generate_splits(config: Dict[str, Any]):
     """Generate stratified cross-validation splits for MEG dataset.
-    
+
+    Supports optional quality filtering controlled by config keys:
+    - ``spike_quality_filtering``: Per-spike channel activity filtering.
+    - ``subject_filtering``: Subject-level spike rate filtering.
+
     Args:
-        config: Configuration dictionary
-    """   
+        config: Configuration dictionary.
+    """
+    filtering_stats = FilteringStatistics()
+
     # Find all .ds files
     logger.info("Discovering MEG data files...")
     ds_files = []
@@ -385,38 +533,97 @@ def generate_splits(config: Dict[str, Any]):
         logger.info(f"Searching for .ds files in {root_dir}")
         root_files = find_ds_files(root_dir, patient_groups, skip_patterns)
         ds_files.extend(root_files)
-    
+
     if not ds_files:
         error_msg = f"No .ds files found in {config['root_dirs']}"
         logger.error(error_msg)
         raise ValueError(error_msg)
-    
+
     logger.info(f"Found {len(ds_files)} .ds files across {len(patient_groups)} patients")
-    
+
     # Split patients into train/val and test groups
     logger.info("Separating test set from train/val patients...")
     train_val_patients, test_patients = split_patients_by_group(patient_groups)
-    
+
     logger.info(f"Train/Val pool: {len(train_val_patients)} patients")
     logger.info(f"Test set: {len(test_patients)} patients")
-    
-    # Generate patient spike statistics
+
+    # Generate patient spike statistics (with optional per-spike quality filtering)
+    spike_quality_config = config.get('spike_quality_filtering')
+    preprocessing_config = config.get('preprocessing')
     patient_stats = generate_patient_spike_statistics(
-        ds_files, patient_groups, annotation_rules
+        ds_files, patient_groups, annotation_rules,
+        spike_quality_config, preprocessing_config,
     )
-    
-    # Generate stratified K-fold splits
+
+    # Stage 1: Raw counts
+    total_raw_spikes = sum(s['total_spikes'] for s in patient_stats.values())
+    total_filtered_spikes = sum(s['total_filtered_spikes'] for s in patient_stats.values())
+    total_duration_min = sum(s['total_duration_s'] for s in patient_stats.values()) / 60.0
+    filtering_stats.add_stage('raw_counts', {
+        'total_patients': len(patient_stats),
+        'total_recordings': len(ds_files),
+        'total_duration_minutes': round(total_duration_min, 1),
+        'total_raw_spikes': total_raw_spikes,
+    })
+
+    # Stage 2: Per-spike quality filtering stats
+    sq = spike_quality_config or {}
+    if sq.get('enabled', False):
+        filtering_stats.add_stage('spike_quality_filter', {
+            'spikes_before': total_raw_spikes,
+            'spikes_after': total_filtered_spikes,
+            'spikes_removed': total_raw_spikes - total_filtered_spikes,
+            'rejection_rate': round(
+                (total_raw_spikes - total_filtered_spikes) / max(total_raw_spikes, 1), 4
+            ),
+            'threshold_zscore': sq.get('threshold_zscore', 2.5),
+            'min_active_channels': sq.get('min_active_channels', 5),
+        })
+
+    # Stage 3: Subject-level filtering
+    subject_filter_config = config.get('subject_filtering', {})
+    if subject_filter_config.get('enabled', False):
+        logger.info("Applying subject-level spike rate filtering...")
+        train_val_patients, removed_patients, subj_filter_stats = filter_low_spike_rate_subjects(
+            patient_stats,
+            train_val_patients,
+            test_patients,
+            min_spikes_per_minute=subject_filter_config.get('min_spikes_per_minute', 0.5),
+            protect_groups=subject_filter_config.get('protect_groups'),
+        )
+        filtering_stats.add_stage('subject_filter', subj_filter_stats)
+
+        if removed_patients:
+            logger.info(
+                f"Removed {len(removed_patients)} subjects with low spike rates: "
+                f"{removed_patients}"
+            )
+        logger.info(f"Train/Val pool after filtering: {len(train_val_patients)} patients")
+
+    # Generate stratified K-fold splits (use filtered spike counts for stratification)
     logger.info(f"Generating {config['n_splits']} stratified folds...")
     splits = generate_stratified_splits(
         train_val_patients, patient_stats, config['n_splits'], config['random_state']
     )
 
+    # Stage 4: Final split stats
+    filtering_stats.add_stage('final_splits', {
+        'n_folds': config['n_splits'],
+        'train_val_patients': len(train_val_patients),
+        'test_patients': len(test_patients),
+        'total_filtered_spikes': total_filtered_spikes,
+    })
+
     # Log detailed statistics
     log_split_statistics(splits, test_patients, patient_stats)
+    filtering_stats.log_summary(logger)
 
-    # Save splits to files
+    # Save splits and filtering statistics
     if 'splits_output_dir' in config:
         save_splits(splits, test_patients, patient_stats, config['splits_output_dir'])
+        stats_path = os.path.join(config['splits_output_dir'], 'filtering_statistics.json')
+        filtering_stats.save(stats_path)
 
     logger.info("Split generation completed successfully!")
     return splits, test_patients, patient_stats

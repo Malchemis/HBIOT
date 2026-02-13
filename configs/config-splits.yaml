@@ -52,6 +52,36 @@ annotation_rules:
     include: []
     exclude: ["true_spike", "detected_spike", "bad_1"]
 
+# Per-spike quality filtering
+# ------------------------------------------
+# Reject individual spikes that do not show activity in enough channels.
+# Requires loading MEG data and computing peak-to-peak amplitude z-scores.
+spike_quality_filtering:
+  enabled: true
+  threshold_zscore: 2.5           # Z-score threshold for active channel detection
+  min_active_channels: 5          # Minimum channels with activity to keep a spike
+  epoch_half_duration_s: 0.05     # Half-window around spike peak for PTP calculation
+
+# Signal processing applied before spike quality filtering
+# ------------------------------------------
+# Must match the main config (default_config.yaml) to ensure consistent
+# spike quality filtering between split generation and HDF5 caching.
+preprocessing:
+  sampling_rate: 200              # Target sampling rate (Hz)
+  l_freq: 1.0                    # High-pass filter cutoff (Hz)
+  h_freq: 99.0                   # Low-pass filter cutoff (Hz)
+  notch_freq: 50.0               # Notch filter for line noise (Hz)
+
+# Subject-level filtering
+# ------------------------------------------
+# Remove subjects with suspiciously low spike rates from train/val pool.
+# Subjects with 0 spikes (controls) are always kept.
+subject_filtering:
+  enabled: true
+  min_spikes_per_minute: 0.5      # Subjects with 0 < rate < this are removed
+  protect_groups:                  # Groups never filtered (e.g., test/holdout)
+    - "Holdout"
+
 # Files to skip
 # ------------------------------------------
 skip_files:
