@@ -686,6 +686,6 @@ class AttentionClassificationHead(nn.Module):
             logits = logits.squeeze(-1)
             # Shape: (B, N, 1) → (B, N)
         
-        # else: keep (B, N, n_classes) for multi-class or onset prediction (B, N, n_classes*2)
+        # else: keep (B, N, n_classes) for multi-class or onset prediction (B, N, n_classes*2)
         log_tensor_statistics(logits, "AttentionClassificationHead final output", logger)
         return logits

@@ -111,7 +111,7 @@ class EMSNET(nn.Module):
                 padding=0
             ),
             nn.LeakyReLU(0.1, inplace=True)
-        ) # Output: (B, 16, 267, 1)
+        ) # Output: (B, 16, 267, 1)
         
         # Second conv layer: 1x1 to increase feature depth
         # Output: (B, 64, 267, 1)

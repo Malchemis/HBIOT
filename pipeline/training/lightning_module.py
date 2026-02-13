@@ -215,7 +215,7 @@ class MEGSpikeDetector(L.LightningModule):
             logger.debug(f"Training window_mask: avg valid={n_valid:.1f}/{X.shape[1]}")
 
         # Forward pass with batch-aware channel mask
-        logits = self.forward(X, channel_mask=channel_mask, window_mask=window_mask, unk_augment=torch.rand(1).item()) # generate a random threshold between 0 and 1 for unk augmentation (-> at each batch, different number and density of channels will be masked)
+        logits = self.forward(X, channel_mask=channel_mask, window_mask=window_mask, unk_augment=torch.rand(1).item()) # generate a random threshold between 0 and 1 for unk augmentation (-> at each batch, different number and density of channels will be masked)
         log_tensor_statistics(logits, "Training logits after forward", logger)
 
         # Calculate loss using window mask only (channel masking is handled in model)
@@ -314,9 +314,9 @@ class MEGSpikeDetector(L.LightningModule):
         """
         X, window_mask, channel_mask, metadata = batch
         
-        # Channel mask is actually true everywhere but for padded channels
-        # We actually don't know if good channels are really good at inference time, we just known that this is real data
-        # So we use an unknown mask that is all True where channel_mask is given
+        # Channel mask is actually true everywhere but for padded channels
+        # We actually don't know if good channels are really good at inference time, we just known that this is real data
+        # So we use an unknown mask that is all True where channel_mask is given
         unknown_mask = torch.ones_like(channel_mask, dtype=torch.bool) if channel_mask is not None else None
 
         # Forward pass with batch-aware channel mask

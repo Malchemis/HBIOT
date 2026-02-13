@@ -288,7 +288,7 @@ class BIOTEncoder(nn.Module):
                 emb_size=emb_size, patch_size=token_size, overlap=overlap, sfreq=sfreq
             )
         else:
-            # warn and use raw mode as fallback
+            # warn and use raw mode as fallback
             self.logger.warning(f"Invalid mode '{mode}', defaulting to 'raw'")
             self.patch_embedding = PatchTimeEmbedding(
                 emb_size=emb_size, patch_size=token_size, overlap=overlap
