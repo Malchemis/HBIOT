@@ -42,36 +42,36 @@ class BIOTHierarchicalClassifier(nn.Module):
     
     ARCHITECTURE OVERVIEW:
     ┌──────────────────────────────────────────────────────────────────────────────────┐
-    │ INPUT: (batch_size, n_windows, n_channels, n_samples_per_window)               │
-    │       Default: (B, 25, 275, 80) - 25 windows of 400ms at 200Hz, 275 MEG channels│
+    │ INPUT: (batch_size, n_windows, n_channels, n_samples_per_window)                 │
+    │       Default: (B, 25, 275, 80) - 25 windows of 400ms at 200Hz, 275 MEG channels │
     └──────────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
     ┌──────────────────────────────────────────────────────────────────────────────┐
-    │ STAGE 1: Intra-window Attention (Per window Processing)                    │
-    │ • Process each window independently using BIOTEncoder                       │
+    │ STAGE 1: Intra-window Attention (Per window Processing)                      │
+    │ • Process each window independently using BIOTEncoder                        │
     │ • Extract multiple representations: CLS + Pooled + Selected tokens (e.g. 6t.)│
     │ • Shape: (BxN, 275, 80) → (B, N, 6, emb_size)                                │
     └──────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
     ┌─────────────────────────────────────────────────────────────────────────────┐
-    │ STAGE 2: window Positional Encoding                                        │
-    │ • Add learnable position embeddings for temporal window order              │
+    │ STAGE 2: window Positional Encoding                                         │
+    │ • Add learnable position embeddings for temporal window order               │
     │ • Shape: (B, N, 6, emb_size) → (B, N, 6, emb_size)                          │
     └─────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
     ┌─────────────────────────────────────────────────────────────────────────────┐
-    │ STAGE 3: Inter-window Attention                                            │
-    │ • Model long-range temporal dependencies between windows                   │
+    │ STAGE 3: Inter-window Attention                                             │
+    │ • Model long-range temporal dependencies between windows                    │
     │ • Shape: (B, Nx6, emb_size) → (B, Nx6, emb_size)                            │
     └─────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
     ┌─────────────────────────────────────────────────────────────────────────────┐
     │ STAGE 4: Classification Head with Attention                                 │
-    │ • Attention-based aggregation of tokens per window                         │
+    │ • Attention-based aggregation of tokens per window                          │
     │ • Shape: (B, Nx6, emb_size) → (B, N, n_classes)                             │
     └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -106,7 +106,6 @@ class BIOTHierarchicalClassifier(nn.Module):
             token_selection: Optional[dict] = None,
             classifier: Optional[dict] = None,
             n_classes: int = 1,
-            reference_coordinates: Dict[str, List[float]] = None,
             max_virtual_batch_size: int = 640,
             channel_embedding: Optional[dict] = None,
             window_overlap: float = 0.5,
@@ -130,7 +129,6 @@ class BIOTHierarchicalClassifier(nn.Module):
                 Can include 'n_selected_tokens', 'use_cls_token', 'use_mean_pool', 'use_max_pool' keys.
             classifier: Parameters for the classification head.
             n_classes: Number of output classes for classification.
-            reference_coordinates: Dictionary mapping channel names to their spatial coordinates.
             max_virtual_batch_size: Maximum virtual batch size (BxN) to process in a single forward pass. Defaults to 640 = 32x20 (tested empirically on h100 with 80GB RAM).
                 When BxN exceeds this value, processing is done in chunks. Default: 640.
             channel_embedding: Composable channel embedding config with keys:
@@ -150,9 +148,6 @@ class BIOTHierarchicalClassifier(nn.Module):
         assert transformer is not None, "Transformer parameters must be provided."
         assert token_selection is not None, "Token selection parameters must be provided."
         assert classifier is not None, "Classifier parameters must be provided."
-
-        if reference_coordinates is None:
-            reference_coordinates = {}
 
         print(f"Initializing BIOTHierarchicalClassifier with input shape: {input_shape}")
         n_windows, n_channels, n_samples_per_window = input_shape
@@ -193,14 +188,10 @@ class BIOTHierarchicalClassifier(nn.Module):
         # Channel embedding composer: composable strategy (learned, spectral, fourier)
         # Must be created before BIOTEncoder which receives a reference to it.
         channel_emb_config = channel_embedding if channel_embedding is not None else {'learned': {'enabled': True}}
-
-        ref_coords = reference_coordinates if isinstance(reference_coordinates, dict) else None
         self.channel_embedding_composer = ChannelEmbeddingComposer(
             n_channels=n_channels,
             emb_size=emb_size,
             config=channel_emb_config,
-            reference_coordinates=ref_coords,
-            channel_names=None,  # Set later via set_fourier_coordinates() from data module
         )
 
         # Modified BIOT encoder for window-level processing with configurable tokens
@@ -261,23 +252,7 @@ class BIOTHierarchicalClassifier(nn.Module):
         else:
             # Single token classification with simple MLP
             from pipeline.models.commons import ClassificationHead
-            self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes)
-
-    def set_fourier_coordinates(
-        self,
-        coordinates_dict: Dict[str, List[float]],
-        channel_names: List[str],
-    ) -> None:
-        """Set Fourier spatial coordinates on the channel embedding composer.
-
-        Should be called once channel names are available (e.g. from the data module
-        during setup). Only needed when fourier embedding is enabled in the config.
-
-        Args:
-            coordinates_dict: Mapping from channel name to [x, y, z].
-            channel_names: Ordered list of channel names matching model's channel order.
-        """
-        self.channel_embedding_composer.set_fourier_coordinates(coordinates_dict, channel_names)
+            self.classifier = ClassificationHead(emb_size=emb_size, n_classes=n_classes, **classifier)
 
     def forward(self, x: torch.Tensor, channel_mask: Optional[torch.Tensor] = None,
                 window_mask: Optional[torch.Tensor] = None, unk_augment: float = 0.0,
@@ -508,7 +483,7 @@ class AttentionClassificationHead(nn.Module):
     └─────────────────────────────────────────────────────────────────────────┘
     """
 
-    def __init__(self, emb_size: int, n_classes: int, n_tokens_per_window: int, num_heads: int = 4, dropout: float = 0.1):
+    def __init__(self, emb_size: int, n_classes: int, n_tokens_per_window: int, num_heads: int = 4, dropout: float = 0.1, predict_event_onset: bool = False):
         """Initialize attention-based classification head.
 
         Args:
@@ -520,11 +495,13 @@ class AttentionClassificationHead(nn.Module):
                 Example: 6 (1 CLS + 2 pooled + 3 selected tokens from window encoder)
             dropout (float, optional): Dropout probability for regularization.
                 Default: 0.1 (10% dropout)
+            predict_event_onset (bool, optional): Whether to predict event onset within window.
+                Default: False (do not predict event onset, only spike presence)
         """
         super().__init__()
         self.n_tokens_per_window = n_tokens_per_window
         self.n_classes = n_classes
-
+        self.predict_event_onset = predict_event_onset
         # Learnable classification query - optimized during training to focus on
         # discriminative features for spike detection
         self.classification_query = nn.Parameter(torch.randn(1, 1, emb_size))
@@ -540,169 +517,175 @@ class AttentionClassificationHead(nn.Module):
         )
 
         # Classification MLP with progressive dimension reduction
+        if predict_event_onset:
+            last_linear = nn.Linear(emb_size // 2, n_classes * 2)  # 128 → n_classes * 2: Event presence + onset for each class
+        else:
+            last_linear = nn.Linear(emb_size // 2, n_classes)  # 128 → n_classes: Typically n_classes=1 for binary spike detection
+
         self.classifier = nn.Sequential(
-            nn.LayerNorm(emb_size),                      # Normalize inputs for stable training
-            nn.Dropout(dropout),                                        # Input dropout for regularization
-            nn.Linear(emb_size, emb_size // 2),  # 256 → 128: Feature compression
-            nn.GELU(),                                                    # Smooth activation function (better than ReLU)
-            nn.Dropout(dropout),                                        # Hidden dropout for additional regularization
-            nn.Linear(emb_size // 2, n_classes)  # 128 → n_classes: Final classification layer
-        )
+                nn.LayerNorm(emb_size),                      # Normalize inputs for stable training
+                nn.Dropout(dropout),                                        # Input dropout for regularization
+                nn.Linear(emb_size, emb_size // 2),  # 256 → 128: Feature compression
+                nn.GELU(),                                                    # Smooth activation function (better than ReLU)
+                nn.Dropout(dropout),                                        # Hidden dropout for additional regularization
+                last_linear                                                   # Final classification layer
+            )
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-            """Forward pass with attention-based token aggregation per window.
+        """Forward pass with attention-based token aggregation per window.
 
-            DETAILED PROCESSING STEPS:
+        DETAILED PROCESSING STEPS:
 
-            1. RESHAPE: Group tokens by window for independent processing
-            2. IDENTIFY: Detect fully masked windows to skip in attention (production approach)
-            3. ATTENTION: Use learnable query to attend to valid windows only
-            - Skips fully masked windows entirely (no wasted computation, no NaN)
-            - Properly masks out padded tokens within valid windows
-            4. CLASSIFICATION: Process attended representation through MLP
-            5. RESHAPE: Return per-window predictions with masked windows zeroed
+        1. RESHAPE: Group tokens by window for independent processing
+        2. IDENTIFY: Detect fully masked windows to skip in attention (production approach)
+        3. ATTENTION: Use learnable query to attend to valid windows only
+        - Skips fully masked windows entirely (no wasted computation, no NaN)
+        - Properly masks out padded tokens within valid windows
+        4. CLASSIFICATION: Process attended representation through MLP
+        5. RESHAPE: Return per-window predictions with masked windows zeroed
 
-            SHAPE TRANSFORMATIONS:
-            - Multi-class (C > 1): (B, NxT, E) → (BxN, T, E) → (BxN_valid, 1, E) → (BxN, C) → (B, N, C)
-            - Binary (C = 1):      (B, NxT, E) → (BxN, T, E) → (BxN_valid, 1, E) → (BxN, 1) → (B, N)
+        SHAPE TRANSFORMATIONS:
+        - Multi-class (C > 1): (B, NxT, E) → (BxN, T, E) → (BxN_valid, 1, E) → (BxN, C) → (B, N, C)
+        - Binary (C = 1):      (B, NxT, E) → (BxN, T, E) → (BxN_valid, 1, E) → (BxN, 1) → (B, N)
 
-            Where:
-                B = batch_size, N = n_windows, T = n_tokens_per_window,
-                E = emb_size, C = n_classes, N_valid = number of valid windows
+        Where:
+            B = batch_size, N = n_windows, T = n_tokens_per_window,
+            E = emb_size, C = n_classes, N_valid = number of valid windows
 
-            Args:
-                x (torch.Tensor): Token embeddings from inter-window transformer.
-                    Shape: (batch_size, n_windows * n_tokens_per_window, emb_size)
-                    Example: (32, 150, 256) for n_tokens_per_window=6, or (32, 25, 256) for n_tokens_per_window=1
+        Args:
+            x (torch.Tensor): Token embeddings from inter-window transformer.
+                Shape: (batch_size, n_windows * n_tokens_per_window, emb_size)
+                Example: (32, 150, 256) for n_tokens_per_window=6, or (32, 25, 256) for n_tokens_per_window=1
 
-                mask (Optional[torch.Tensor]): Token validity mask (1=valid, 0=masked/padded).
-                    Shape: (batch_size, n_windows * n_tokens_per_window)
-                    Example: (32, 150) where masked tokens should be ignored in attention
+            mask (Optional[torch.Tensor]): Token validity mask (1=valid, 0=masked/padded).
+                Shape: (batch_size, n_windows * n_tokens_per_window)
+                Example: (32, 150) where masked tokens should be ignored in attention
 
-            Returns:
-                torch.Tensor: Classification logits for each window.
-                    Shape: (batch_size, n_windows, n_classes) if n_classes > 1
-                           (batch_size, n_windows) if n_classes == 1
-                    Example: (32, 25) for binary classification
-                    Raw logits for spike classification per window
-            """
-            batch_size = x.size(0)
-            n_windows = x.size(1) // self.n_tokens_per_window
-            emb_size = x.size(2)
+        Returns:
+            torch.Tensor: Classification logits for each window.
+                Shape: (batch_size, n_windows, n_classes) if n_classes > 1
+                        (batch_size, n_windows) if n_classes == 1
+                Example: (32, 25) for binary classification
+                Raw logits for spike classification per window
+        """
+        batch_size = x.size(0)
+        n_windows = x.size(1) // self.n_tokens_per_window
+        emb_size = x.size(2)
 
-            # Log input
-            logger = logging.getLogger(__name__)
-            log_tensor_statistics(x, f"AttentionClassificationHead input (B={batch_size}, N={n_windows})", logger)
+        # Log input
+        logger = logging.getLogger(__name__)
+        log_tensor_statistics(x, f"AttentionClassificationHead input (B={batch_size}, N={n_windows})", logger)
+        if mask is not None:
+            n_valid_tokens = mask.sum(dim=1).float().mean().item()
+            logger.debug(f"AttentionClassificationHead mask: avg valid tokens={n_valid_tokens:.1f}/{x.size(1)}")
+
+        # Handle single token case - no attention needed
+        if self.n_tokens_per_window == 1:
+            x = x.view(batch_size * n_windows, -1)  # (B*N, E)
+            logits = self.classifier(x)  # (B*N, n_classes)
+
+            # Zero out invalid windows
             if mask is not None:
-                n_valid_tokens = mask.sum(dim=1).float().mean().item()
-                logger.debug(f"AttentionClassificationHead mask: avg valid tokens={n_valid_tokens:.1f}/{x.size(1)}")
+                window_valid_mask = mask.view(batch_size * n_windows)  # (B*N,)
+                logits = logits * window_valid_mask.unsqueeze(-1).float()
 
-            # Handle single token case - no attention needed
-            if self.n_tokens_per_window == 1:
-                x = x.view(batch_size * n_windows, -1)  # (B*N, E)
-                logits = self.classifier(x)  # (B*N, n_classes)
-
-                # Zero out invalid windows
-                if mask is not None:
-                    window_valid_mask = mask.view(batch_size * n_windows)  # (B*N,)
-                    logits = logits * window_valid_mask.unsqueeze(-1).float()
-
-                logits = logits.view(batch_size, n_windows, -1)
-
-                # For binary classification (n_classes=1), squeeze last dimension to get (B, N)
-                if self.n_classes == 1:
-                    logits = logits.squeeze(-1)
-
-                log_tensor_statistics(logits, "AttentionClassificationHead output (single token)", logger)
-                return logits
-
-            # ═══════════════════════════════════════════════════════════════════════════
-            # STEP 1: Reshape to Process Each Window Independently (Multi-token case)
-            # ═══════════════════════════════════════════════════════════════════════════
-            x = x.view(batch_size * n_windows, self.n_tokens_per_window, emb_size)
-            # Shape: (B, NxT, E) → (BxN, T, E)
-
-            # ═══════════════════════════════════════════════════════════════════════════
-            # STEP 2: Identify Valid Windows (Skip Fully Masked - Production Approach)
-            # ═══════════════════════════════════════════════════════════════════════════
-            valid_windows_mask = None
-            key_padding_mask_valid = None
-            
-            if mask is not None:
-                # Reshape mask to per-window: (B, N*T) → (B*N, T)
-                mask_reshaped = mask.view(batch_size * n_windows, self.n_tokens_per_window)
-                
-                # Identify windows with at least one valid token
-                valid_windows_mask = mask_reshaped.any(dim=1)  # (BxN,) True where window has >=1 valid token
-                n_valid = valid_windows_mask.sum().item()
-                n_total = batch_size * n_windows
-                
-                if n_valid < n_total:
-                    logger.debug(f"AttentionClassificationHead: skipping {n_total - n_valid}/{n_total} fully masked windows")
-                
-                # Prepare key_padding_mask only for valid windows
-                # PyTorch MultiheadAttention: True = ignore, False = attend
-                # Our convention: 1 = valid, 0 = masked → invert
-                if n_valid > 0:
-                    key_padding_mask_valid = ~mask_reshaped[valid_windows_mask].bool()  # (N_valid, T)
-
-            # ═══════════════════════════════════════════════════════════════════════════
-            # STEP 3: Attention-based Token Aggregation (Valid Windows Only)
-            # ═══════════════════════════════════════════════════════════════════════════
-            # Initialize output for all windows (zeros for masked windows)
-            attended_output = torch.zeros(
-                batch_size * n_windows, 1, emb_size,
-                device=x.device, dtype=x.dtype
-            )  # (BxN, 1, E)
-            
-            # Process only valid windows through attention (skip fully masked)
-            if valid_windows_mask is None or valid_windows_mask.all():
-                # Fast path: all windows valid
-                query = self.classification_query.expand(batch_size * n_windows, 1, emb_size).to(dtype=x.dtype)
-                attended_output, _ = self.token_attention(
-                    query, x, x,
-                    key_padding_mask=key_padding_mask_valid
-                )
-            elif valid_windows_mask.any():              
-                # Slow path: some windows masked, skip them entirely
-                n_valid = int(valid_windows_mask.sum().item())
-                query_valid = self.classification_query.expand(n_valid, 1, emb_size).to(dtype=x.dtype)
-                x_valid = x[valid_windows_mask]  # (N_valid, T, E)
-
-                attended_output_valid, _ = self.token_attention(
-                    query_valid, x_valid, x_valid,
-                    key_padding_mask=key_padding_mask_valid
-                )  # (N_valid, 1, E)
-
-                # Place valid outputs back into full tensor
-                attended_output[valid_windows_mask] = attended_output_valid.to(dtype=attended_output.dtype)
-            # else: all windows masked, keep zeros
-                
-            log_tensor_statistics(attended_output, "AttentionClassificationHead after attention", logger)
-
-            # ═══════════════════════════════════════════════════════════════════════════
-            # STEP 4: Classification Through MLP
-            # ═══════════════════════════════════════════════════════════════════════════
-            logits = self.classifier(attended_output.squeeze(1))
-            # Shape: (BxN, 1, E) → (BxN, E) → (BxN, n_classes)
-            
-            # Zero out logits for fully masked windows (redundant but explicit)
-            if valid_windows_mask is not None and not valid_windows_mask.all():
-                logits[~valid_windows_mask] = 0.0
-                
-            log_tensor_statistics(logits, "AttentionClassificationHead after classifier MLP", logger)
-
-            # ═══════════════════════════════════════════════════════════════════════════
-            # STEP 5: Reshape to Window Structure
-            # ═══════════════════════════════════════════════════════════════════════════
             logits = logits.view(batch_size, n_windows, -1)
-            # Shape: (BxN, n_classes) → (B, N, n_classes)
 
             # For binary classification (n_classes=1), squeeze last dimension to get (B, N)
-            # This ensures consistency with ground truth labels shape
-            if self.n_classes == 1:
+            if self.n_classes == 1 and not self.predict_event_onset:
                 logits = logits.squeeze(-1)
-                # Shape: (B, N, 1) → (B, N)
 
-            log_tensor_statistics(logits, "AttentionClassificationHead final output", logger)
+            log_tensor_statistics(logits, "AttentionClassificationHead output (single token)", logger)
             return logits
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 1: Reshape to Process Each Window Independently (Multi-token case)
+        # ═══════════════════════════════════════════════════════════════════════════
+        x = x.view(batch_size * n_windows, self.n_tokens_per_window, emb_size)
+        # Shape: (B, NxT, E) → (BxN, T, E)
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 2: Identify Valid Windows (Skip Fully Masked - Production Approach)
+        # ═══════════════════════════════════════════════════════════════════════════
+        valid_windows_mask = None
+        key_padding_mask_valid = None
+        
+        if mask is not None:
+            # Reshape mask to per-window: (B, N*T) → (B*N, T)
+            mask_reshaped = mask.view(batch_size * n_windows, self.n_tokens_per_window)
+            
+            # Identify windows with at least one valid token
+            valid_windows_mask = mask_reshaped.any(dim=1)  # (BxN,) True where window has >=1 valid token
+            n_valid = valid_windows_mask.sum().item()
+            n_total = batch_size * n_windows
+            
+            if n_valid < n_total:
+                logger.debug(f"AttentionClassificationHead: skipping {n_total - n_valid}/{n_total} fully masked windows")
+            
+            # Prepare key_padding_mask only for valid windows
+            # PyTorch MultiheadAttention: True = ignore, False = attend
+            # Our convention: 1 = valid, 0 = masked → invert
+            if n_valid > 0:
+                key_padding_mask_valid = ~mask_reshaped[valid_windows_mask].bool()  # (N_valid, T)
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 3: Attention-based Token Aggregation (Valid Windows Only)
+        # ═══════════════════════════════════════════════════════════════════════════
+        # Initialize output for all windows (zeros for masked windows)
+        attended_output = torch.zeros(
+            batch_size * n_windows, 1, emb_size,
+            device=x.device, dtype=x.dtype
+        )  # (BxN, 1, E)
+        
+        # Process only valid windows through attention (skip fully masked)
+        if valid_windows_mask is None or valid_windows_mask.all():
+            # Fast path: all windows valid
+            query = self.classification_query.expand(batch_size * n_windows, 1, emb_size).to(dtype=x.dtype)
+            attended_output, _ = self.token_attention(
+                query, x, x,
+                key_padding_mask=key_padding_mask_valid
+            )
+        elif valid_windows_mask.any():              
+            # Slow path: some windows masked, skip them entirely
+            n_valid = int(valid_windows_mask.sum().item())
+            query_valid = self.classification_query.expand(n_valid, 1, emb_size).to(dtype=x.dtype)
+            x_valid = x[valid_windows_mask]  # (N_valid, T, E)
+
+            attended_output_valid, _ = self.token_attention(
+                query_valid, x_valid, x_valid,
+                key_padding_mask=key_padding_mask_valid
+            )  # (N_valid, 1, E)
+
+            # Place valid outputs back into full tensor
+            attended_output[valid_windows_mask] = attended_output_valid.to(dtype=attended_output.dtype)
+        # else: all windows masked, keep zeros
+            
+        log_tensor_statistics(attended_output, "AttentionClassificationHead after attention", logger)
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 4: Classification Through MLP
+        # ═══════════════════════════════════════════════════════════════════════════
+        logits = self.classifier(attended_output.squeeze(1))
+        # Shape: (BxN, 1, E) → (BxN, E) → (BxN, n_classes)
+        
+        # Zero out logits for fully masked windows (redundant but explicit)
+        if valid_windows_mask is not None and not valid_windows_mask.all():
+            logits[~valid_windows_mask] = 0.0
+            
+        log_tensor_statistics(logits, "AttentionClassificationHead after classifier MLP", logger)
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STEP 5: Reshape to Window Structure
+        # ═══════════════════════════════════════════════════════════════════════════
+        logits = logits.view(batch_size, n_windows, -1)
+        # Shape: (BxN, n_classes) → (B, N, n_classes)
+
+        # For binary classification (n_classes=1), squeeze last dimension to get (B, N)
+        # This ensures consistency with ground truth labels shape
+        if self.n_classes == 1 and not self.predict_event_onset:
+            logits = logits.squeeze(-1)
+            # Shape: (B, N, 1) → (B, N)
+        
+        # else: keep (B, N, n_classes) for multi-class or onset prediction (B, N, n_classes*2)
+        log_tensor_statistics(logits, "AttentionClassificationHead final output", logger)
+        return logits

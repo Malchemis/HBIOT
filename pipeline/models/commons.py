@@ -11,8 +11,8 @@ These components are used across different model architectures (BIOT, HBIOT, etc
 
 import logging
 import math
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+import pickle
 
 import numpy as np
 import torch
@@ -819,6 +819,8 @@ class FourierSpatialEmbedding(nn.Module):
         coordinate_dim: int = 3,
         learnable_linear: bool = True,
         augmentation_noise_std: float = 0.0,
+        channel_order: List[str] = [],
+        coordinates_dict: Dict[str, List[float]] = {},
     ):
         super().__init__()
         self.n_frequencies = n_frequencies
@@ -848,7 +850,7 @@ class FourierSpatialEmbedding(nn.Module):
         self.register_buffer('freq_bands', freq_bands)
 
         # Coordinate buffer — set via set_coordinates()
-        self.register_buffer('coordinates', torch.empty(0))
+        self.register_buffer('coordinates', self.set_coordinates(coordinates_dict, channel_order))
 
         self.logger.info(
             f"Initialized FourierSpatialEmbedding: n_frequencies={n_frequencies}, "
@@ -861,7 +863,7 @@ class FourierSpatialEmbedding(nn.Module):
         self,
         coordinates_dict: Dict[str, List[float]],
         channel_order: List[str],
-    ) -> None:
+    ) -> torch.Tensor:
         """Set the 3D coordinates tensor from a dictionary.
 
         Args:
@@ -876,11 +878,11 @@ class FourierSpatialEmbedding(nn.Module):
                 coord_vals = coordinates_dict[ch_name][:self.coordinate_dim]
                 coords[i] = torch.tensor(coord_vals, dtype=torch.float32)
                 n_found += 1
-        self.coordinates = coords.to(self.freq_bands.device)
         self.logger.info(
             f"Set coordinates for {n_found}/{C} channels "
             f"(range: [{coords.min():.4f}, {coords.max():.4f}])"
         )
+        return coords
 
     def _fourier_encode(self, coords: torch.Tensor) -> torch.Tensor:
         """Compute Fourier encoding of coordinates.
@@ -955,8 +957,6 @@ class ChannelEmbeddingComposer(nn.Module):
         n_channels: int,
         emb_size: int,
         config: Dict[str, Any],
-        reference_coordinates: Optional[Dict[str, List[float]]] = None,
-        channel_names: Optional[List[str]] = None,
     ):
         super().__init__()
         self.emb_size = emb_size
@@ -986,22 +986,20 @@ class ChannelEmbeddingComposer(nn.Module):
         if self.use_fourier:
             fourier_params = {
                 k: v for k, v in fourier_cfg.items()
-                if k not in ('enabled', 'spatial_coordinates_path')
+                if k not in ('enabled', 'spatial_coordinates_path', 'channel_order')
             }
+
+            channel_order_path = fourier_cfg.get('channel_order')
+            channel_loc_path = fourier_cfg.get('spatial_coordinates_path')
+            with open(channel_order_path, 'rb') as f:
+                channel_order = pickle.load(f)
+                fourier_params['channel_order'] = channel_order
+
+            with open(channel_loc_path, 'rb') as f:
+                coordinates_dict = pickle.load(f)
+                fourier_params['coordinates_dict'] = coordinates_dict
+
             self.fourier_module = FourierSpatialEmbedding(emb_size=emb_size, **fourier_params)
-
-            # Load coordinates from path if not provided directly
-            spatial_path = fourier_cfg.get('spatial_coordinates_path')
-            if reference_coordinates is None and spatial_path is not None:
-                import pickle
-                spatial_path = Path(spatial_path) if not isinstance(spatial_path, Path) else spatial_path
-                with open(spatial_path, 'rb') as f:
-                    reference_coordinates = pickle.load(f)
-                self.logger.info(f"Loaded spatial coordinates from {spatial_path}")
-
-            if reference_coordinates is not None and channel_names is not None:
-                self.fourier_module.set_coordinates(reference_coordinates, channel_names)
-            self._fourier_reference_coordinates = reference_coordinates
             self.strategies.append('fourier')
 
         # Special token embeddings (always present for masking)
@@ -1015,26 +1013,6 @@ class ChannelEmbeddingComposer(nn.Module):
             )
 
         self.logger.info(f"ChannelEmbeddingComposer strategies: {self.strategies}")
-
-    def set_fourier_coordinates(
-        self,
-        coordinates_dict: Dict[str, List[float]],
-        channel_names: List[str],
-    ) -> None:
-        """Set Fourier spatial coordinates after initialization.
-
-        Call this once channel names are known (e.g. from the data module).
-
-        Args:
-            coordinates_dict: Mapping from channel name to [x, y, z].
-            channel_names: Ordered list of channel names.
-        """
-        if self.fourier_module is None:
-            raise RuntimeError(
-                "Cannot set Fourier coordinates: fourier strategy is not enabled."
-            )
-        self.fourier_module.set_coordinates(coordinates_dict, channel_names)
-        self._fourier_reference_coordinates = coordinates_dict
 
     def compute_spectral_embeddings(
         self,
@@ -1102,19 +1080,25 @@ class ClassificationHead(nn.Sequential):
         clshead (nn.Sequential): Sequential module with the classification layers.
     """
 
-    def __init__(self, emb_size: int, n_classes: int):
+    def __init__(self, emb_size: int, n_classes: int, predict_event_onset: bool = False, **kwargs):
         """Initialize the classification head.
 
         Args:
             emb_size: Size of the input embedding.
             n_classes: Number of output classes.
+            predict_event_onset (bool, optional): Whether to predict event onset within window.
+                Default: False (do not predict event onset, only spike presence)
         """
         super().__init__()
+        
+        self.predict_event_onset = predict_event_onset
+        self.n_classes = n_classes
+        last_linear_out = n_classes if not predict_event_onset else n_classes * 2
         self.clshead = nn.Sequential(
             nn.ELU(),
             nn.Linear(emb_size, emb_size // 2),
             nn.ELU(),
-            nn.Linear(emb_size // 2, n_classes),
+            nn.Linear(emb_size // 2, last_linear_out),
         )
         self.logger = logging.getLogger(__name__ + ".ClassificationHead")
         self.logger.debug(f"Initialized with emb_size={emb_size}, n_classes={n_classes}")
@@ -1129,7 +1113,10 @@ class ClassificationHead(nn.Sequential):
         """
         # Classify each window
         # x: (batch, emb_size) or (batch * n_windows, emb_size)
-        return self.clshead(x).squeeze(-1)
+        logits = self.clshead(x)
+        if self.n_classes == 1 and not self.predict_event_onset:
+            logits = logits.squeeze(-1)
+        return logits
 
 
 class AttentionClassificationHead(nn.Module):
@@ -1146,9 +1133,13 @@ class AttentionClassificationHead(nn.Module):
         n_tokens_per_window: int,
         num_heads: int = 4,
         dropout: float = 0.1,
+        predict_event_onset: bool = False,
+        **kwargs,
     ):
         super().__init__()
         self.n_tokens_per_window = n_tokens_per_window
+        self.n_classes = n_classes
+        self.predict_event_onset = predict_event_onset
 
         # learnable classification query token
         self.classification_query = nn.Parameter(torch.randn(1, 1, emb_size))
@@ -1162,13 +1153,14 @@ class AttentionClassificationHead(nn.Module):
         )
 
         # final MLP to map the attended embedding to class‐scores
+        last_linear_out = n_classes if not predict_event_onset else n_classes * 2
         self.classifier = nn.Sequential(
             nn.LayerNorm(emb_size),
             nn.Dropout(dropout),
             nn.Linear(emb_size, emb_size // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(emb_size // 2, n_classes),
+            nn.Linear(emb_size // 2, last_linear_out),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1191,5 +1183,7 @@ class AttentionClassificationHead(nn.Module):
         # classifier → (B, n_classes)
         logits = self.classifier(pooled)
 
-        return logits.squeeze(-1)
+        if self.n_classes == 1 and not self.predict_event_onset:
+            logits = logits.squeeze(-1)
 
+        return logits

@@ -68,6 +68,7 @@ model:
     classifier:
       num_heads: 8                   # Number of classification heads
       dropout: 0.2                   # Classifier dropout rate
+      predict_event_onset: false     # Predict spike onset in addition to presence
 
     reference_coordinates: "${reference_channels}"  # Path to channel coordinate file
     window_overlap: 0.5               # Must match dataset_config.window_overlap (for PLV signal reconstruction)
@@ -156,9 +157,6 @@ data:
     root_dirs:
       - "${root_dir}"
       # - "/additional/data/path"              # Add more if needed
-
-    # Optional cache directory (legacy, use preprocessed_dir instead)
-    cache_dir: "${data_dir}/meg_preprocessing"
 
     # Reference channel coordinates file (pickle format)
     reference_coordinates: "${reference_channels}"
@@ -276,6 +274,7 @@ data:
       estimated_spike_duration_s: 0.1         # Expected total spike duration (seconds)
       first_half_spike_duration: 0.05         # Duration before spike peak
       second_half_spike_duration: 0.05        # Duration after spike peak
+      predict_event_onset: false              # Predict spike onset in addition to presence
 
       # ----------------------------------------------------------------------
       # Signal Processing Pipeline
@@ -438,7 +437,7 @@ scheduler:
 trainer:
   max_epochs: 100                             # Maximum training epochs
   accelerator: "auto"                         # Options: "auto", "gpu", "cpu", "tpu"
-  devices: 1 #"auto"                             # Number of devices: "auto", 1, [0,1,2], etc.
+  devices: "auto"                             # Number of devices: "auto", 1, [0,1,2], etc.
   precision: "bf16-mixed"                     # Options: "32", "16-mixed", "bf16-mixed"
                                               # bf16-mixed = bfloat16 (faster, more stable)
   gradient_clip_val: null                     # Global gradient clipping (null = disabled)
@@ -457,7 +456,7 @@ trainer:
 
   # DDP (Distributed Data Parallel) configuration
   ddp:
-    find_unused_parameters: true              # Find unused parameters (needed for some models)
+    find_unused_parameters: false              # Set true only if model has conditional unused params
 
 # ------------------------------------------------------------------------------
 # Callbacks Configuration

@@ -113,7 +113,7 @@ class EMSNET(nn.Module):
             nn.LeakyReLU(0.1, inplace=True)
         ) # Output: (B, 16, 267, 1)
         
-        # Second conv layer: 1×1 to increase feature depth
+        # Second conv layer: 1x1 to increase feature depth
         # Output: (B, 64, 267, 1)
         self.global_conv2 = nn.Sequential(
             nn.Conv2d(16, 64, kernel_size=1, stride=1),

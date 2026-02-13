@@ -119,7 +119,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -131,7 +131,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_validation_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset validation outputs and metrics aggregator."""
         self.validation_outputs = []
@@ -141,7 +141,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_validation_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Compute and log validation metrics."""
         if not self.validation_outputs:
@@ -176,7 +176,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_test_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -188,7 +188,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_test_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset test outputs and metrics aggregator."""
         self.test_outputs = []
@@ -202,7 +202,7 @@ class MetricsEvaluationCallback(L.Callback):
     def on_test_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Compute test metrics, generate reports, and save results."""
         if not self.test_outputs:
@@ -261,7 +261,6 @@ class MetricsEvaluationCallback(L.Callback):
         # Reset aggregator
         self.metrics_aggregator.reset()
 
-        # Update aggregator with all batch outputs
         for batch_output in outputs:
             self.metrics_aggregator.update(
                 probs=batch_output["probs"],
@@ -271,6 +270,9 @@ class MetricsEvaluationCallback(L.Callback):
                 n_windows=batch_output["n_windows"],
                 metadata=batch_output.get("metadata"),
                 losses=batch_output.get("losses"),
+                onset_probs=batch_output.get("onset_probs"),
+                gt_onsets=batch_output.get("gt_onsets"),
+                onset_losses=batch_output.get("onset_losses"),
             )
 
         # Compute metrics
@@ -281,10 +283,7 @@ class MetricsEvaluationCallback(L.Callback):
         return scalar_metrics  # type: ignore
 
     def _log_probability_distributions(self, trainer: L.Trainer) -> None:
-        """Log probability distributions for class 0 and class 1 to TensorBoard.
-
-        This helps visualize how well the model is separating the two classes.
-        Ideally, class 0 probabilities should cluster near 0, and class 1 near 1.
+        """Log probability distributions for presence and onset predictions to TensorBoard.
 
         Args:
             trainer: Lightning trainer instance
@@ -293,69 +292,83 @@ class MetricsEvaluationCallback(L.Callback):
             return
 
         import numpy as np
+        import torch
 
-        # Collect all probabilities and ground truth labels
         all_probs = []
         all_gt = []
         all_masks = []
+        all_onset_probs = []
+        all_gt_onsets = []
 
         for output in self.validation_outputs:
-            # Flatten each batch individually to handle variable N across batches
-            # (some recordings may have fewer windows than max_N after padding)
             all_probs.append(output["probs"].flatten())
             all_gt.append(output["gt"].flatten())
             if output.get("mask") is not None:
                 all_masks.append(output["mask"].flatten())
+            if output.get("onset_probs") is not None:
+                all_onset_probs.append(output["onset_probs"].flatten())
+            if output.get("gt_onsets") is not None:
+                all_gt_onsets.append(output["gt_onsets"].flatten())
 
-        # Concatenate flattened arrays (all are now 1D)
         probs = np.concatenate(all_probs)
         gt = np.concatenate(all_gt)
 
-        # Apply mask if available (filter out padded/invalid samples)
         if all_masks:
             masks = np.concatenate(all_masks)
             valid_indices = masks > 0
             probs = probs[valid_indices]
             gt = gt[valid_indices]
 
-        # Separate probabilities by class
-        class_0_probs = probs[gt == 0]  # Non-spike windows
-        class_1_probs = probs[gt == 1]  # Spike windows
+        class_0_probs = probs[gt == 0]
+        class_1_probs = probs[gt == 1]
 
-        # Log histograms to TensorBoard
         try:
-            # Convert to torch tensors for TensorBoard
-            import torch
-
             if len(class_0_probs) > 0:
                 trainer.logger.experiment.add_histogram(
-                    'val_probability_distribution/class_0_non_spike',
+                    'val_probability_distribution/presence_non_spike',
                     torch.from_numpy(class_0_probs),
                     global_step=trainer.current_epoch
                 )
 
             if len(class_1_probs) > 0:
                 trainer.logger.experiment.add_histogram(
-                    'val_probability_distribution/class_1_spike',
+                    'val_probability_distribution/presence_spike',
                     torch.from_numpy(class_1_probs),
                     global_step=trainer.current_epoch
                 )
 
-            # Log summary statistics for monitoring
-            if len(class_0_probs) > 0 and len(class_1_probs) > 0:
-                self.logger.debug(
-                    f"Probability distributions - "
-                    f"Class 0 (non-spike): mean={class_0_probs.mean():.4f}, "
-                    f"Class 1 (spike): mean={class_1_probs.mean():.4f}"
-                )
+            if all_onset_probs and all_gt_onsets:
+                onset_probs = np.concatenate(all_onset_probs)
+                gt_onsets = np.concatenate(all_gt_onsets)
+
+                if all_masks:
+                    onset_probs = onset_probs[valid_indices]
+                    gt_onsets = gt_onsets[valid_indices]
+
+                spike_mask = gt == 1
+                if spike_mask.sum() > 0:
+                    spike_onset_preds = onset_probs[spike_mask]
+                    spike_onset_gt = gt_onsets[spike_mask]
+
+                    trainer.logger.experiment.add_histogram(
+                        'val_onset_distribution/predicted_onsets',
+                        torch.from_numpy(spike_onset_preds),
+                        global_step=trainer.current_epoch
+                    )
+
+                    trainer.logger.experiment.add_histogram(
+                        'val_onset_distribution/ground_truth_onsets',
+                        torch.from_numpy(spike_onset_gt),
+                        global_step=trainer.current_epoch
+                    )
 
         except Exception as e:
-            self.logger.debug(f"Could not log probability distributions: {e}")
+            self.logger.debug(f"Could not log distributions: {e}")
 
     def _save_predictions_csv(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Save test predictions to CSV file.
         This includes metadata and formatted predictions for each sample.
@@ -388,7 +401,9 @@ class MetricsEvaluationCallback(L.Callback):
             batch_size = output['batch_size']
             metadata_list = output['metadata']
 
-            # Metadata is a list of dicts (one dict per sample in batch)
+            onset_preds = output.get('onset_probs')
+            onset_gt = output.get('gt_onsets')
+
             if not isinstance(metadata_list, list):
                 self.logger.error(f"Expected metadata to be a list, got {type(metadata_list)}")
                 continue
@@ -400,21 +415,17 @@ class MetricsEvaluationCallback(L.Callback):
 
                 sample_meta = metadata_list[i]
 
-                # Format predictions for this sample
                 pred_probs = predictions[i].flatten()
                 pred_classes = (pred_probs >= threshold).astype(int)
                 gt_flat = ground_truth[i].flatten()
 
-                # Extract metadata using unified naming convention
                 chunk_onset = sample_meta.get('chunk_onset_sample', 0)
-                # chunk_idx is per-file, global_chunk_idx is across dataset (OnlineWindowDataset only)
                 global_chunk_idx = sample_meta.get('global_chunk_idx', None)
-                chunk_idx = sample_meta.get('chunk_idx', sample_meta.get('chunk_index', 0))  # Fallback for old format
+                chunk_idx = sample_meta.get('chunk_idx', sample_meta.get('chunk_index', 0))
                 spikes = sample_meta.get('spike_positions_in_chunk', [])
                 start_window_idx = sample_meta.get('start_window_idx', 0)
                 end_window_idx = sample_meta.get('end_window_idx', 0)
 
-                # Extract preprocessing config
                 preprocessing_config = sample_meta.get('preprocessing_config', {})
                 sampling_rate = preprocessing_config.get('sampling_rate', 0) if isinstance(preprocessing_config, dict) else 0
 
@@ -426,10 +437,10 @@ class MetricsEvaluationCallback(L.Callback):
                     'group': sample_meta.get('group', 'Unknown'),
                     'global_chunk_idx': global_chunk_idx,
                     'chunk_onset_sample': chunk_onset,
-                    'chunk_index': chunk_idx,  # Keep for backward compatibility (alias for chunk_idx)
-                    'chunk_idx': chunk_idx,  # Unified field name
-                    'start_window_idx': start_window_idx,  # Window traceability
-                    'end_window_idx': end_window_idx,  # Window traceability
+                    'chunk_index': chunk_idx,
+                    'chunk_idx': chunk_idx,
+                    'start_window_idx': start_window_idx,
+                    'end_window_idx': end_window_idx,
                     'spike_positions_in_chunk': spikes,
                     'extraction_mode': sample_meta.get('extraction_mode', 'fixed'),
                     'sampling_rate': sampling_rate,
@@ -437,6 +448,15 @@ class MetricsEvaluationCallback(L.Callback):
                     'predicted_classes': ','.join(map(str, pred_classes)),
                     'ground_truth': ','.join(map(str, gt_flat)),
                 }
+
+                if onset_preds is not None:
+                    onset_pred_flat = onset_preds[i].flatten()
+                    row['predicted_onsets'] = ','.join(f"{float(o):.4f}" for o in onset_pred_flat)
+
+                if onset_gt is not None:
+                    onset_gt_flat = onset_gt[i].flatten()
+                    row['ground_truth_onsets'] = ','.join(f"{float(o):.4f}" for o in onset_gt_flat)
+
                 csv_data.append(row)
 
         if csv_data:
@@ -552,7 +572,7 @@ class GradientNormLogger(L.Callback):
             clip_eps: Small constant to avoid division by zero (default: 1e-6)
             clip_warmup_steps: Number of steps to collect gradients before enabling clipping (default: 25)
             clip_mode: Clipping mode - "zscore" or "percentile" (default: "zscore")
-                      - "percentile": Always clip to mean + (z_thresh × std)
+                      - "percentile": Always clip to mean + (z_thresh x std)
                       - "zscore": Use z-score based adaptive clipping
             clip_option: Strategy for zscore mode - "adaptive_scaling" or "mean" (default: "adaptive_scaling")
                         - "adaptive_scaling": Adaptive threshold based on outlier magnitude
@@ -612,7 +632,7 @@ class GradientNormLogger(L.Callback):
     def on_before_optimizer_step(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         optimizer: torch.optim.Optimizer
     ) -> None:
         """Compute gradient norm once, apply adaptive clipping, and log all metrics.
@@ -665,7 +685,7 @@ class GradientNormLogger(L.Callback):
 
     def _apply_adaptive_clipping(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         grad_norm: float
     ) -> tuple[bool, float, Optional[float], Optional[float], bool]:
         """Apply adaptive gradient clipping (integrated ZClip functionality).
@@ -768,7 +788,7 @@ class GradientNormLogger(L.Callback):
         assert self.clip_mean is not None
 
         if self.clip_mode == "percentile":
-            # Percentile mode: always use fixed threshold = mean + (z_thresh × std)
+            # Percentile mode: always use fixed threshold = mean + (z_thresh x std)
             threshold = self.clip_mean + self.clip_z_thresh * std
             if grad_norm > threshold:
                 return threshold
@@ -795,7 +815,7 @@ class GradientNormLogger(L.Callback):
 
     def _apply_in_place_clipping(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         grad_norm: float,
         max_norm: float
     ) -> None:
@@ -815,7 +835,7 @@ class GradientNormLogger(L.Callback):
 
     def _apply_max_norm_clipping(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         grad_norm: float,
         max_norm: float
     ) -> None:
@@ -853,7 +873,7 @@ class GradientNormLogger(L.Callback):
 
     def _log_all_gradient_metrics(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         trainer: L.Trainer,
         pre_clip_norm: float,
         post_clip_norm: float,
@@ -963,6 +983,7 @@ class GradientNormLogger(L.Callback):
             return 0.0
 
         first_param = parameters[0]
+        assert first_param.grad is not None, "First parameter has no gradient."
         device = first_param.grad.device
         dtype = first_param.dtype
 
@@ -986,13 +1007,14 @@ class GradientNormLogger(L.Callback):
         # Regular model or non-L2 norm
         if self.norm_type == float('inf'):
             # Infinity norm: max of absolute values
-            total_norm = max(p.grad.detach().abs().max().to(device) for p in parameters)
+            total_norm = max(p.grad.detach().abs().max().to(device) for p in parameters if p.grad is not None)
         else:
             # L2 norm (most common)
             total_norm = torch.norm(
                 torch.stack([
                     torch.norm(p.grad.detach(), self.norm_type).to(device)
                     for p in parameters
+                    if p.grad is not None
                 ]),
                 self.norm_type
             )
@@ -1013,7 +1035,7 @@ class GradientNormLogger(L.Callback):
         # Handle both LightningModule (with .model attribute) and regular nn.Module
         model = pl_module.model if hasattr(pl_module, 'model') else pl_module
 
-        for module_name, module in model.named_modules():
+        for module_name, module in model.named_modules(): # type: ignore
             # Skip empty module names and containers without parameters
             if not module_name:
                 continue
@@ -1029,14 +1051,16 @@ class GradientNormLogger(L.Callback):
                 continue
 
             # Compute norm for this module
+            assert parameters[0].grad is not None, "Parameter has no gradient."
             device = parameters[0].grad.device
             if self.norm_type == float('inf'):
-                norm = max(p.grad.detach().abs().max().to(device) for p in parameters)
+                norm = max(p.grad.detach().abs().max().to(device) for p in parameters if p.grad is not None)
             else:
                 norm = torch.norm(
                     torch.stack([
                         torch.norm(p.grad.detach(), self.norm_type).to(device)
                         for p in parameters
+                        if p.grad is not None
                     ]),
                     self.norm_type
                 )
@@ -1063,7 +1087,7 @@ class GradientNormLogger(L.Callback):
         # Handle both LightningModule (with .model attribute) and regular nn.Module
         model = pl_module.model if hasattr(pl_module, 'model') else pl_module
 
-        for param_name, param in model.named_parameters():
+        for param_name, param in model.named_parameters(): # type: ignore
             if param.grad is None:
                 continue
 
@@ -1083,7 +1107,7 @@ class GradientNormLogger(L.Callback):
 
     def _log_gradient_distributions(
         self,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         trainer: L.Trainer
     ) -> None:
         """Log gradient distribution statistics (histograms, percentiles, sparsity).
@@ -1205,7 +1229,7 @@ class TemperatureScalingCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -1227,7 +1251,7 @@ class TemperatureScalingCallback(L.Callback):
     def on_validation_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset validation outputs at the start of each validation epoch."""
         self.validation_outputs = []
@@ -1235,7 +1259,7 @@ class TemperatureScalingCallback(L.Callback):
     def on_validation_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Optimize temperature on validation set at the end of validation epoch."""
         if not self.enabled:
@@ -1289,12 +1313,13 @@ class TemperatureScalingCallback(L.Callback):
         gt_tensor = torch.from_numpy(gt).float().to(pl_module.device)
 
         # Optimize temperature
+        assert isinstance(pl_module.temperature, nn.Parameter)
         initial_temp = pl_module.temperature.item()
         optimized_temp = self._optimize_temperature(logits_tensor, gt_tensor, pl_module.temperature)
 
         # Update temperature in Lightning module
         pl_module.temperature.data = torch.tensor([optimized_temp], device=pl_module.device)
-        pl_module.hparams["temperature"] = optimized_temp  # type: ignore
+        pl_module.hparams["temperature"] = optimized_temp
 
         # Log the optimized temperature
         pl_module.log("temperature", optimized_temp, sync_dist=True, on_epoch=True)
@@ -1382,7 +1407,7 @@ class CalibrationDiagnosticCallback(L.Callback):
     def on_validation_batch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer],
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"],
         outputs: Any,
         batch: Any,
         batch_idx: int
@@ -1398,7 +1423,7 @@ class CalibrationDiagnosticCallback(L.Callback):
     def on_validation_epoch_start(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Reset outputs at epoch start."""
         self.validation_outputs = []
@@ -1406,7 +1431,7 @@ class CalibrationDiagnosticCallback(L.Callback):
     def on_validation_epoch_end(
         self,
         trainer: L.Trainer,
-        pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]
+        pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]
     ) -> None:
         """Compute and log calibration metrics at epoch end."""
         # Only log every N epochs
@@ -1617,8 +1642,8 @@ class CalibrationDiagnosticCallback(L.Callback):
             ax.set_title('Reliability Diagram - Model Calibration', fontsize=14, fontweight='bold')
             ax.legend(fontsize=10, loc='upper left')
             ax.grid(alpha=0.3, linestyle='--')
-            ax.set_xlim([0, 1])
-            ax.set_ylim([0, 1])
+            ax.set_xlim((0, 1))
+            ax.set_ylim((0, 1))
             ax.set_aspect('equal')
 
             # Convert plot to image tensor
@@ -1631,6 +1656,7 @@ class CalibrationDiagnosticCallback(L.Callback):
             img_array = np.array(img)
             img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
 
+            assert trainer.logger is not None
             trainer.logger.experiment.add_image(
                 'calibration/reliability_diagram',
                 img_tensor,
@@ -1688,7 +1714,7 @@ class ProjectionLayerCallback(L.Callback):
         self.frozen = False
         self.logger = logging.getLogger(__name__)
 
-    def setup(self, trainer: L.Trainer, pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer], stage: str) -> None:
+    def setup(self, trainer: L.Trainer, pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"], stage: str) -> None:
         """Set up the callback at the start of training.
 
         Args:
@@ -1699,7 +1725,7 @@ class ProjectionLayerCallback(L.Callback):
         self.logger.info(f"Projection layer callback setup with freeze_after_epochs={self.freeze_after_epochs}, "
                          f"freeze_on_plateau={self.freeze_on_plateau}, patience={self.patience}")
 
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer], stage: str) -> None:
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"], stage: str) -> None:
         """Check whether to freeze the projection layer at the end of each epoch.
 
         Args:
@@ -1731,7 +1757,7 @@ class ProjectionLayerCallback(L.Callback):
                 self.logger.info(f"Validation metric {self.monitor} plateaued for {self.patience} epochs.")
                 self._freeze_projection(pl_module)
 
-    def _freeze_projection(self, pl_module: Union[MEGSpikeDetector, MEGUnsupervisedPretrainer]) -> None:
+    def _freeze_projection(self, pl_module: Union["MEGSpikeDetector", "MEGUnsupervisedPretrainer"]) -> None:
         """Freeze the projection layer in the model.
 
         Args:
