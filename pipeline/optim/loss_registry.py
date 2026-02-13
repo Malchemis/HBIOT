@@ -61,10 +61,10 @@ class FocalLoss(nn.Module):
         
         # Use BCE with reduction='none' for proper focal loss calculation
         self.bce_fn = nn.BCEWithLogitsLoss(reduction='none')
-        # Use an Onset loss for onset prediction if needed
-        self.onset_loss_fn = nn.SmoothL1Loss(reduction='none')  # might be better than MSE regarding outliers
+        # Use an Onset loss for onset prediction if needed
+        self.onset_loss_fn = nn.SmoothL1Loss(reduction='none')  # might be better than MSE regarding outliers
         
-        # Per Batch and Per Window loss history for monitoring
+        # Per Batch and Per Window loss history for monitoring
         self.history_presence_loss = deque([], maxlen=5)
         self.history_onset_loss = deque([], maxlen=5)
     
@@ -84,10 +84,10 @@ class FocalLoss(nn.Module):
         
         B, N_s, *_ = predictions.shape
 
-        # Infer if onset prediction is included based on target shape
+        # Infer if onset prediction is included based on target shape
         onset_and_prediction = targets.size(-1) == 2
         if onset_and_prediction:
-            # Split presence and onset targets
+            # Split presence and onset targets
             presence_predictions = predictions[..., 0]
             presence_targets = targets[..., 0]
             onset_predictions = torch.sigmoid(predictions[..., 1])  # Onset predictions should be in [0, 1], as targets are
@@ -123,7 +123,7 @@ class FocalLoss(nn.Module):
             # log_tensor_statistics(focal_loss, "FocalLoss focal_loss (after masking)", logger)
             
             if onset_and_prediction:
-                # Only penalize onset loss when presence should have been predicted
+                # Only penalize onset loss when presence should have been predicted
                 onset_loss = self.onset_loss_fn(onset_predictions.view(-1), onset_targets.view(-1)) * presence_targets.view(-1) * mask_flat.float()
                 self.history_onset_loss.append(onset_loss.reshape(B, N_s))
             

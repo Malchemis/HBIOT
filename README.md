@@ -170,7 +170,7 @@ trainer:
   accelerator: "auto"
   devices: "auto"
   precision: 16-mixed              # Mixed precision training
-  gradient_clip_val: null          # We use ZClip
+  gradient_clip_val: null          # We use ZClip
 
 optimizer:
   name: AdamW

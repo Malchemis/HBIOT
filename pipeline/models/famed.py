@@ -106,7 +106,7 @@ class FAMED_Classification(nn.Module):
         self.ch_num = ch_num
         super(FAMED_Classification, self).__init__()
         
-        # Reduced stride to (1,1) for our shorter input length
+        # Reduced stride to (1,1) for our shorter input length
         self.init = nn.Sequential(
             nn.Conv2d(1, int(inplanes/2), kernel_size=3, stride=(1,1), padding=(1,1), dilation=(1,1)),
             nn.BatchNorm2d(int(inplanes/2)),

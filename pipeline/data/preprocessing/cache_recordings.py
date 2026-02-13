@@ -201,10 +201,10 @@ def load_preprocessed_recording(
         Tuple of (meg_data, spike_samples, metadata, channel_info)
     """
     with h5py.File(cache_path, 'r', swmr=True) as f:  # SWMR = Single Writer Multiple Reader
-        meg_data = f['meg_data'][:]                # type: ignore
-        spike_samples = f['spike_samples'][:]      # type: ignore
-        metadata = json.loads(f['metadata'][()])                              # type: ignore
-        channel_info = json.loads(f['channel_info'][()])                      # type: ignore
+        meg_data = f['meg_data'][:]                # type: ignore
+        spike_samples = f['spike_samples'][:]      # type: ignore
+        metadata = json.loads(f['metadata'][()])                              # type: ignore
+        channel_info = json.loads(f['channel_info'][()])                      # type: ignore
 
     return meg_data, spike_samples, metadata, channel_info # type: ignore
 

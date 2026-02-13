@@ -244,7 +244,7 @@ def main(config_path: str, resume: bool = False, test_only: bool = False, token_
 
     datamodule.prepare_data()
     datamodule.setup(stage='fit' if not test_only else 'test')
-    input_shape = datamodule.get_input_shape() # type: ignore
+    input_shape = datamodule.get_input_shape() # type: ignore
 
     ckpt_path = experiment_config.get("checkpoint_path", None)
     if ckpt_path:
