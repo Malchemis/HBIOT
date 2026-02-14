@@ -336,7 +336,7 @@ def calculate_window_labels_from_spikes(
 
             if overlap_ratio > max_overlap:
                 max_overlap = overlap_ratio
-                if predict_event_onset:
+                if predict_event_onset and seg_start <= spike_pos < seg_end:
                     best_spike_pos = spike_pos
 
         presence = 1.0 if max_overlap > 0 else 0.0
