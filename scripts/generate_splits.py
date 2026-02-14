@@ -132,7 +132,7 @@ def load_meg_data_and_count_spikes(
 
         # Optional per-spike quality filtering
         sq = spike_quality_config or {}
-        if sq.get('enabled', False) and len(spike_onsets) > 0:
+        if sq.get('enabled', False) and len(spike_onsets) > 0 and patient_group not in sq.get('protect_groups', []):
             # Apply the same preprocessing pipeline used during caching
             apply_standard_filters(raw, preprocessing_config)
 
@@ -142,8 +142,8 @@ def load_meg_data_and_count_spikes(
                 spike_onsets,
                 raw.info['sfreq'],
                 epoch_half_duration_s=sq.get('epoch_half_duration_s', 0.05),
-                threshold_zscore=sq.get('threshold_zscore', 2.5),
-                min_active_channels=sq.get('min_active_channels', 5),
+                threshold_zscore=sq.get('threshold_zscore', 1.5),
+                min_active_channels=sq.get('min_active_channels', 3),
             )
             result['filtered_spike_count'] = len(kept)
             result['filter_stats'] = fstats

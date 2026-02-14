@@ -124,7 +124,7 @@ def preprocess_recording(
     # Optional per-spike quality filtering
     sq = config.get('spike_quality_filtering', {})
     spike_filter_stats = None
-    if sq.get('enabled', False) and len(spike_onsets) > 0:
+    if sq.get('enabled', False) and len(spike_onsets) > 0 and group not in sq.get('protect_groups', []):
         kept_onsets, rejected_onsets, spike_filter_stats = filter_spikes_by_channel_activity(
             meg_data,
             spike_onsets,
