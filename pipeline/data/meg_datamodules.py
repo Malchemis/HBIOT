@@ -190,14 +190,12 @@ class MEGOnTheFlyDataModule(L.LightningDataModule):
             sys.path.insert(0, str(scripts_dir))
 
             from scripts.generate_splits import generate_splits
-            from pipeline.data.preprocessing.annotation import compile_annotation_patterns
             split_config = {
                 'root_dirs': self.root_dirs,
                 'n_splits': self.n_folds,
                 'random_state': self.seed,
                 'splits_output_dir': self.splits_dir,
-                'annotation_rules': self.dataset_config.get('annotation_rules', {}),
-                'skip_files': self.dataset_config.get('skip_files', []),
+                **self.dataset_config,
             }
 
             if not self.root_dirs:

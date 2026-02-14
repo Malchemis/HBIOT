@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import h5py
+import mne
 import numpy as np
 from joblib import Parallel, delayed
 from tqdm import tqdm
@@ -99,6 +100,7 @@ def preprocess_recording(
     Returns:
         Tuple of (meg_data, spike_samples, metadata, channel_info).
     """
+    mne.set_log_level('ERROR')  # Suppress verbose MNE logging in worker threads
     logger.debug(f"Preprocessing {file_path}")
 
     if compiled_patterns is None:
@@ -297,7 +299,7 @@ def preprocess_and_cache_files(
 
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
-    results: List[bool] = Parallel(n_jobs=n_workers, backend='threading')(
+    results: List[bool] = Parallel(n_jobs=n_workers, backend='threading', verbose=10)(
         delayed(_preprocess_and_cache_single_file)(
             fp, config, good_channels, cache_dir, force, compiled_patterns
         )

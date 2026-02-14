@@ -11,7 +11,6 @@ Supports optional quality filtering:
 import json
 import os
 import re
-import pickle
 import pathlib
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Any
@@ -22,6 +21,11 @@ import mne
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
+from joblib import Parallel, delayed
+
+import sys
+project_root = pathlib.Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 from pipeline.data.preprocessing.annotation import get_spike_annotations, compile_annotation_patterns
 from pipeline.data.preprocessing.file_manager import find_ds_files
@@ -86,13 +90,14 @@ def load_meg_data_and_count_spikes(
             - duration_s: Recording duration in seconds.
             - filter_stats: Per-spike filtering statistics (None if disabled).
     """
+    mne.set_log_level(verbose='ERROR')
     result = {'spike_count': 0, 'filtered_spike_count': 0, 'duration_s': 0.0, 'filter_stats': None}
 
     try:
         if ".ds" in file_path:
-            raw = mne.io.read_raw_ctf(file_path, preload=False).pick(picks=['meg'], exclude='bads').load_data()
+            raw = mne.io.read_raw_ctf(file_path, preload=False, verbose=False).pick(picks=['meg'], exclude='bads').load_data()
         elif ".fif" in file_path:
-            raw = mne.io.read_raw_fif(file_path, preload=False).pick(picks=['meg'], exclude='bads').load_data()
+            raw = mne.io.read_raw_fif(file_path, preload=False, verbose=False).pick(picks=['meg'], exclude='bads').load_data()
         elif os.path.isdir(file_path):
             subject_path = pathlib.Path(file_path)
             files = list(subject_path.glob("*"))
@@ -150,71 +155,64 @@ def load_meg_data_and_count_spikes(
         return result
 
 
+def _process_patient(patient_id, files, patient_group, annotation_rules,
+                     spike_quality_config, preprocessing_config):
+    total_spikes = 0
+    total_filtered_spikes = 0
+    total_duration_s = 0.0
+    for file_info in files:
+        file_result = load_meg_data_and_count_spikes(
+            file_info['path'], patient_group, annotation_rules,
+            spike_quality_config, preprocessing_config,
+        )
+        total_spikes += file_result['spike_count']
+        total_filtered_spikes += file_result['filtered_spike_count']
+        total_duration_s += file_result['duration_s']
+
+    total_duration_min = total_duration_s / 60.0
+    spikes_per_minute = total_filtered_spikes / max(total_duration_min, 1e-6)
+
+    stats = {
+        'group': patient_group,
+        'total_spikes': total_spikes,
+        'total_filtered_spikes': total_filtered_spikes,
+        'total_duration_s': total_duration_s,
+        'spikes_per_minute': spikes_per_minute,
+        'file_count': len(files),
+        'files': [f['path'] for f in files],
+    }
+    logger.debug(
+        f"Patient {patient_id} ({patient_group}): "
+        f"{total_spikes} raw spikes, {total_filtered_spikes} filtered spikes, "
+        f"{total_duration_min:.1f} min, {spikes_per_minute:.2f} spikes/min"
+    )
+    return patient_id, stats
+
+
 def generate_patient_spike_statistics(
     ds_files: List[Dict],
     patient_groups: Dict[str, str],
     annotation_rules: Dict[str, Any],
     spike_quality_config: Optional[Dict[str, Any]] = None,
     preprocessing_config: Optional[Dict[str, Any]] = None,
+    njobs: int = 1,
 ) -> Dict[str, Dict]:
-    """Generate spike statistics for each patient.
-
-    Args:
-        ds_files: List of file dictionaries with metadata.
-        patient_groups: Dictionary mapping patient IDs to groups.
-        annotation_rules: Dictionary containing annotation rules for each group.
-        spike_quality_config: Optional config for per-spike quality filtering.
-        preprocessing_config: Optional config for standard signal processing.
-
-    Returns:
-        Dictionary with patient statistics including duration and filtered spike counts.
-    """
+    """Generate spike statistics for each patient."""
     logger.info("Analyzing spike statistics for all patients...")
 
-    # Group files by patient
     patient_files = defaultdict(list)
     for file_info in ds_files:
-        patient_id = file_info['patient_id']
-        patient_files[patient_id].append(file_info)
+        patient_files[file_info['patient_id']].append(file_info)
 
-    patient_stats = {}
-
-    for patient_id, files in tqdm(patient_files.items(), desc="Processing patients"):
-        patient_group = patient_groups[patient_id]
-        total_spikes = 0
-        total_filtered_spikes = 0
-        total_duration_s = 0.0
-        file_count = len(files)
-
-        for file_info in files:
-            file_path = file_info['path']
-            file_result = load_meg_data_and_count_spikes(
-                file_path, patient_group, annotation_rules,
-                spike_quality_config, preprocessing_config,
-            )
-            total_spikes += file_result['spike_count']
-            total_filtered_spikes += file_result['filtered_spike_count']
-            total_duration_s += file_result['duration_s']
-
-        total_duration_min = total_duration_s / 60.0
-        spikes_per_minute = total_filtered_spikes / max(total_duration_min, 1e-6)
-
-        patient_stats[patient_id] = {
-            'group': patient_group,
-            'total_spikes': total_spikes,
-            'total_filtered_spikes': total_filtered_spikes,
-            'total_duration_s': total_duration_s,
-            'spikes_per_minute': spikes_per_minute,
-            'file_count': file_count,
-            'files': [f['path'] for f in files],
-        }
-
-        logger.debug(
-            f"Patient {patient_id} ({patient_group}): "
-            f"{total_spikes} raw spikes, {total_filtered_spikes} filtered spikes, "
-            f"{total_duration_min:.1f} min, {spikes_per_minute:.2f} spikes/min"
+    results = Parallel(n_jobs=njobs, verbose=10)(
+        delayed(_process_patient)(
+            patient_id, files, patient_groups[patient_id],
+            annotation_rules, spike_quality_config, preprocessing_config,
         )
+        for patient_id, files in patient_files.items()
+    )
 
+    patient_stats = {patient_id: stats for patient_id, stats in results}
     return patient_stats
 
 
@@ -510,7 +508,7 @@ def filter_low_spike_rate_subjects(
     return filtered, removed, filter_stats
 
 
-def generate_splits(config: Dict[str, Any]):
+def generate_splits(config: Dict[str, Any], njobs: int = 1) -> Tuple[List[Tuple[List[str], List[str]]], List[str], Dict[str, Dict]]:
     """Generate stratified cross-validation splits for MEG dataset.
 
     Supports optional quality filtering controlled by config keys:
@@ -519,6 +517,7 @@ def generate_splits(config: Dict[str, Any]):
 
     Args:
         config: Configuration dictionary.
+        njobs: Number of parallel jobs to run.
     """
     filtering_stats = FilteringStatistics()
 
@@ -550,10 +549,16 @@ def generate_splits(config: Dict[str, Any]):
 
     # Generate patient spike statistics (with optional per-spike quality filtering)
     spike_quality_config = config.get('spike_quality_filtering')
-    preprocessing_config = config.get('preprocessing')
+    preprocessing_config = {
+        'sampling_rate': config['sampling_rate'],
+        'l_freq': config['l_freq'],
+        'h_freq': config['h_freq'],
+        'notch_freq': config['notch_freq'],
+    }
     patient_stats = generate_patient_spike_statistics(
         ds_files, patient_groups, annotation_rules,
         spike_quality_config, preprocessing_config,
+        njobs=njobs
     )
 
     # Stage 1: Raw counts
@@ -634,6 +639,7 @@ def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Generate cross-validation splits")
     parser.add_argument('--config', type=str, required=True, help='Path to YAML configuration file')
+    parser.add_argument('--njobs', type=int, required=True, help='Number of parallel jobs to run')
     args = parser.parse_args()
 
     config = load_config(args.config, validate=False)
@@ -646,7 +652,7 @@ def main():
     logger.info(f"Logging to {log_file} with level {log_level}")
 
     mne.set_log_level(verbose=logging.ERROR)
-    generate_splits(config)
+    generate_splits(config, njobs=args.njobs)
 
 if __name__ == "__main__":
     main()
