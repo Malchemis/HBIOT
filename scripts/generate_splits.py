@@ -216,28 +216,28 @@ def generate_patient_spike_statistics(
     return patient_stats
 
 
-def create_stratification_bins(spike_counts: List[int], n_bins: int = 5) -> List[int]:
-    """Create stratification bins based on spike counts.
-    
+def create_stratification_bins(values: List[float], n_bins: int = 5) -> List[int]:
+    """Create stratification bins based on a continuous variable (e.g. spike rate).
+
     Args:
-        spike_counts: List of spike counts
-        n_bins: Number of bins to create
-        
+        values: List of values to bin (e.g. spikes per minute).
+        n_bins: Number of bins to create.
+
     Returns:
-        List of bin assignments for each patient
+        List of bin assignments for each patient.
     """
-    if len(spike_counts) == 0:
+    if len(values) == 0:
         return []
     
     # Create percentile-based bins
     percentiles = np.linspace(0, 100, n_bins + 1)
-    bin_edges = np.percentile(spike_counts, percentiles)
+    bin_edges = np.percentile(values, percentiles)
     
     # Ensure unique bin edges
     bin_edges = np.unique(bin_edges)
     
     # Assign bins
-    bins = np.digitize(spike_counts, bin_edges) - 1
+    bins = np.digitize(values, bin_edges) - 1
     # Ensure bins are in valid range [0, n_bins-1]
     bins = np.clip(bins, 0, len(bin_edges) - 2)
     
@@ -260,16 +260,16 @@ def generate_stratified_splits(train_val_patients: List[str], patient_stats: Dic
     if len(train_val_patients) < n_splits:
         raise ValueError(f"Cannot create {n_splits} folds with only {len(train_val_patients)} patients")
     
-    # Extract spike counts for stratification (use filtered counts if available)
-    spike_counts = [
-        patient_stats[patient_id].get('total_filtered_spikes', patient_stats[patient_id]['total_spikes'])
+    # Extract spike rates for stratification (spikes/min normalises across recording lengths)
+    spike_rates = [
+        patient_stats[patient_id].get('spikes_per_minute', 0.0)
         for patient_id in train_val_patients
     ]
-    
+
     # Create stratification bins
-    stratification_bins = create_stratification_bins(spike_counts, n_bins=min(5, len(train_val_patients)))
-    
-    logger.info(f"Created {len(set(stratification_bins))} stratification bins based on spike counts")
+    stratification_bins = create_stratification_bins(spike_rates, n_bins=min(5, len(train_val_patients)))
+
+    logger.info(f"Created {len(set(stratification_bins))} stratification bins based on spike rate (spikes/min)")
     
     # Create stratified K-fold splits
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)

@@ -316,7 +316,7 @@ def main(config_path: str, resume: bool = False, test_only: bool = False, token_
 
     if not test_only:
         logger.info("Starting training...")
-        trainer.fit(lightning_module, datamodule, ckpt_path=ckpt_path)
+        trainer.fit(lightning_module, datamodule, ckpt_path=ckpt_path, weights_only=False)
         logger.info("Training completed successfully.")
     else:
         logger.info("Skipping training (test-only mode)")
@@ -325,7 +325,7 @@ def main(config_path: str, resume: bool = False, test_only: bool = False, token_
     if not ckpt_path:
         ckpt_path = find_best_checkpoint(tb_logger.log_dir)
         logger.info(f"Best checkpoint found: {ckpt_path}")
-    trainer.test(lightning_module, datamodule, ckpt_path=ckpt_path)
+    trainer.test(lightning_module, datamodule, ckpt_path=ckpt_path, weights_only=False)
     logger.info("Testing completed.")
 
 

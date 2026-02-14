@@ -71,7 +71,8 @@ def predict_spikes(
     input_shape = tuple(config["model"][config["model"]["name"]]["input_shape"])
 
     model = MEGSpikeDetector.load_from_checkpoint(
-        checkpoint_path, config=config, input_shape=input_shape, log_dir=None
+        checkpoint_path, config=config, input_shape=input_shape, log_dir=None,
+        weights_only=False,
     )
 
     print(f"Best threshold from training: {model.threshold:.4f}")

@@ -211,7 +211,37 @@ def save_preprocessed_recording(
             dtype=h5py.string_dtype('utf-8'),
         )
 
+    # Verify the file is readable immediately after writing
+    try:
+        with h5py.File(output_path, 'r') as f:
+            _ = f['meg_data'].shape
+    except Exception as e:
+        logger.error(f"Verification failed for {output_path}, removing corrupt file: {e}")
+        output_path.unlink(missing_ok=True)
+        raise IOError(f"HDF5 verification failed for {output_path}: {e}") from e
+
     logger.debug(f"Saved preprocessed recording to {output_path}")
+
+
+def verify_cached_file(cache_path: Path) -> bool:
+    """Check whether an HDF5 cache file can be opened and has expected datasets.
+
+    Args:
+        cache_path: Path to cached HDF5 file.
+
+    Returns:
+        True if the file is valid, False otherwise.
+    """
+    try:
+        with h5py.File(cache_path, 'r') as f:
+            for key in ('meg_data', 'spike_samples', 'metadata', 'channel_info'):
+                if key not in f:
+                    logger.warning(f"Missing dataset '{key}' in {cache_path}")
+                    return False
+        return True
+    except Exception as e:
+        logger.warning(f"Corrupt cache file {cache_path}: {e}")
+        return False
 
 
 def load_preprocessed_recording(
@@ -252,8 +282,12 @@ def _preprocess_and_cache_single_file(
     cache_path = get_cache_path(file_path, cache_dir, config)
 
     if cache_path.exists() and not force:
-        logger.debug(f"Using cached file: {cache_path}")
-        return False
+        if verify_cached_file(cache_path):
+            logger.debug(f"Using cached file: {cache_path}")
+            return False
+        else:
+            logger.warning(f"Corrupt cache file detected, re-preprocessing: {cache_path}")
+            cache_path.unlink(missing_ok=True)
 
     try:
         meg_data, spike_samples, metadata, channel_info = preprocess_recording(

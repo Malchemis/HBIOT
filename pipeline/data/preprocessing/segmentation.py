@@ -43,34 +43,22 @@ def create_chunks(meg_data: np.ndarray, spike_samples: List[int], config: Dict) 
     window_step = max(1, int(window_duration_samples * (1 - window_overlap)))
     n_windows = config['n_windows']
 
-    spike_duration_samples = int(config.get('estimated_spike_duration_s', 0.1) * config['sampling_rate'])
-    first_half = int(config.get('first_half_spike_duration', 0.05) * config['sampling_rate'])
-    second_half = int(config.get('second_half_spike_duration', 0.05) * config['sampling_rate'])
-    
     # Create windows
     windows, sp_pos, seg_labels = [], [], []
     seg_start = 0
-    
+
     while seg_start + window_duration_samples <= meg_data.shape[1]:
         seg_end = seg_start + window_duration_samples
         windows.append(meg_data[:, seg_start:seg_end])
-        
-        # Find spikes and calculate overlap
+
+        # Find spikes whose peak falls inside this window
         seg_spikes = []
-        max_overlap = 0.0
-        
         for onset in spike_samples:
             if seg_start <= onset < seg_end:
                 seg_spikes.append(onset - seg_start)
-            
-            spike_start = onset - first_half
-            spike_end = onset + second_half
-            
-            overlap = max(0, min(seg_end, spike_end) - max(seg_start, spike_start))
-            max_overlap = max(max_overlap, overlap / spike_duration_samples)
-        
+
         sp_pos.append(seg_spikes)
-        seg_labels.append(1.0 if max_overlap > 0 else 0.0)
+        seg_labels.append(1.0 if len(seg_spikes) > 0 else 0.0)
         
         # Move to next window with configured overlap
         seg_start += window_step
@@ -313,10 +301,6 @@ def calculate_window_labels_from_spikes(
     window_overlap = config.get('window_overlap', 0.0)
     window_step = max(1, int(window_duration_samples * (1 - window_overlap)))
 
-    spike_duration_samples = int(config.get('estimated_spike_duration_s', 0.1) * config['sampling_rate'])
-    first_half = int(config.get('first_half_spike_duration', 0.05) * config['sampling_rate'])
-    second_half = int(config.get('second_half_spike_duration', 0.05) * config['sampling_rate'])
-    
     predict_event_onset = config.get('predict_event_onset', False)
 
     labels = []
@@ -325,21 +309,15 @@ def calculate_window_labels_from_spikes(
         seg_start = i * window_step
         seg_end = seg_start + window_duration_samples
 
-        max_overlap = 0.0
+        # A window is positive only if a spike peak falls inside it
         best_spike_pos = None
 
         for spike_pos in spike_positions:
-            spike_start = spike_pos - first_half
-            spike_end = spike_pos + second_half
-            overlap = max(0, min(seg_end, spike_end) - max(seg_start, spike_start))
-            overlap_ratio = overlap / spike_duration_samples
+            if seg_start <= spike_pos < seg_end:
+                best_spike_pos = spike_pos
+                break  # Use first spike peak found in window
 
-            if overlap_ratio > max_overlap:
-                max_overlap = overlap_ratio
-                if predict_event_onset and seg_start <= spike_pos < seg_end:
-                    best_spike_pos = spike_pos
-
-        presence = 1.0 if max_overlap > 0 else 0.0
+        presence = 1.0 if best_spike_pos is not None else 0.0
 
         if predict_event_onset:
             onset = (best_spike_pos - seg_start) / window_duration_samples if best_spike_pos is not None else 0.0
