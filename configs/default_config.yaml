@@ -214,6 +214,8 @@ data:
                                               # Set to an integer for a fixed count across all recordings
     force_preprocess: false                   # Force reprocessing even if cache exists
                                               # Set true if you changed preprocessing params
+    max_cache_gb: null                        # Memory budget for LRU meg_data cache (GB)
+                                              # null = auto (50% system RAM), or explicit value e.g. 40
 
     # ==========================================================================
     # DataLoader Configuration

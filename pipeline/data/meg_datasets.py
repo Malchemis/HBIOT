@@ -49,6 +49,7 @@ import random
 import traceback
 from functools import partial
 from multiprocessing import cpu_count
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import mne
@@ -69,11 +70,15 @@ from pipeline.data.preprocessing.segmentation import (
 )
 from pipeline.data.preprocessing.signal_processing import load_and_process_meg_data, augment_data, find_gfp_peak_in_window
 from pipeline.data.preprocessing.annotation import compile_annotation_patterns, get_spike_annotations
+from collections import OrderedDict
+
 from pipeline.data.preprocessing.cache_recordings import (
     get_cache_path,
     preprocess_recording,
     save_preprocessed_recording,
     load_preprocessed_recording,
+    load_recording_lightweight,
+    load_meg_data,
 )
 
 
@@ -433,12 +438,78 @@ class PredictDataset(torch.utils.data.Dataset):
         return torch.tensor(windows, dtype=torch.float32), metadata
 
 
-class OnlineWindowDataset(torch.utils.data.Dataset):
-    """Dataset that loads recordings once and extracts chunks on-the-fly.
+class RecordingCache:
+    """Memory-budgeted LRU cache for MEG recording data.
 
-    Loads preprocessed MEG recordings into memory and extracts chunks dynamically during
-    training for temporal diversity. Supports both random (training) and sequential (test)
-    extraction modes.
+    Stores lightweight metadata (spike_samples, metadata, channel_info, n_samples)
+    permanently for all recordings. The heavy meg_data arrays are loaded on-demand
+    from HDF5 and evicted LRU-first when the cache exceeds its memory budget.
+
+    Fork-safe: no persistent HDF5 handles are stored. Each load opens/closes the file.
+    """
+
+    def __init__(self, max_cache_bytes: int):
+        self.max_cache_bytes = max_cache_bytes
+
+        # Permanent lightweight storage (populated during _load_recordings)
+        self.cache_paths: List[Path] = []
+        self.spike_samples_list: List[np.ndarray] = []
+        self.metadata_list: List[Dict[str, Any]] = []
+        self.channel_info_list: List[Dict[str, Any]] = []
+        self.n_samples_list: List[int] = []
+
+        # LRU cache for meg_data: rec_idx -> np.ndarray
+        self._meg_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._cache_bytes: int = 0
+
+        self.logger = logging.getLogger(__name__)
+
+    def add_recording(
+        self,
+        cache_path: 'Path',
+        spike_samples: np.ndarray,
+        metadata: Dict[str, Any],
+        channel_info: Dict[str, Any],
+        n_samples: int,
+    ) -> int:
+        """Register a recording's lightweight data. Returns its index."""
+        idx = len(self.cache_paths)
+        self.cache_paths.append(cache_path)
+        self.spike_samples_list.append(spike_samples)
+        self.metadata_list.append(metadata)
+        self.channel_info_list.append(channel_info)
+        self.n_samples_list.append(n_samples)
+        return idx
+
+    def get_meg_data(self, rec_idx: int) -> np.ndarray:
+        """Return meg_data for a recording, loading from HDF5 on cache miss."""
+        if rec_idx in self._meg_cache:
+            self._meg_cache.move_to_end(rec_idx)
+            return self._meg_cache[rec_idx]
+
+        meg_data = load_meg_data(self.cache_paths[rec_idx])
+        entry_bytes = meg_data.nbytes
+
+        # Evict LRU entries until we have room (or cache is empty)
+        while self._cache_bytes + entry_bytes > self.max_cache_bytes and self._meg_cache:
+            evicted_idx, evicted_data = self._meg_cache.popitem(last=False)
+            self._cache_bytes -= evicted_data.nbytes
+
+        self._meg_cache[rec_idx] = meg_data
+        self._cache_bytes += entry_bytes
+        return meg_data
+
+    def __len__(self) -> int:
+        return len(self.cache_paths)
+
+
+class OnlineWindowDataset(torch.utils.data.Dataset):
+    """Dataset that loads recordings lazily with memory-budgeted LRU caching.
+
+    Stores lightweight metadata for all recordings at init. Heavy meg_data arrays
+    are loaded on-demand from HDF5 and evicted LRU-first when the cache exceeds
+    its memory budget. This prevents OOM with large datasets and reduces memory
+    duplication across DataLoader worker processes.
 
     Returns:
         Tuple of (data, labels, metadata) with unified metadata convention including
@@ -482,17 +553,49 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
 
         self.compiled_patterns = compile_annotation_patterns(config.get('annotation_rules', {}))
 
-        self.recordings = []
-        self.all_windows_per_recording = []
-        self.chunks_per_recording = []
-        self.cumulative_chunks = []
+        # Compute memory budget for LRU cache
+        max_cache_gb = config.get('max_cache_gb', None)
+        if max_cache_gb is not None:
+            max_cache_bytes = int(max_cache_gb * (1024 ** 3))
+        else:
+            max_cache_bytes = self._detect_system_ram_bytes() // 2
+            self.logger.info(
+                f"max_cache_gb not set, auto-detected 50%% system RAM: "
+                f"{max_cache_bytes / (1024**3):.1f} GB"
+            )
+
+        self.cache = RecordingCache(max_cache_bytes)
+        self._spikes_refined: set = set()
+
+        self.chunks_per_recording: List[int] = []
+        self.cumulative_chunks: Union[List, np.ndarray] = []
 
         self._load_recordings()
         self._build_index_map()
 
+    @staticmethod
+    def _detect_system_ram_bytes() -> int:
+        """Detect total system RAM in bytes using /proc/meminfo (Linux) or os.sysconf."""
+        try:
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if line.startswith('MemTotal:'):
+                        return int(line.split()[1]) * 1024  # kB -> bytes
+        except (FileNotFoundError, ValueError, IndexError):
+            pass
+        try:
+            import os
+            pages = os.sysconf('SC_PHYS_PAGES')
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            return pages * page_size
+        except (ValueError, OSError, AttributeError):
+            pass
+        # Fallback: 64 GB
+        return 64 * (1024 ** 3)
+
     def _load_recordings(self):
-        """Load or preprocess all recordings into memory."""
-        self.logger.info(f"Loading {len(self.file_paths)} recordings into memory")
+        """Load lightweight metadata for all recordings (no meg_data loaded)."""
+        self.logger.info(f"Loading {len(self.file_paths)} recordings (lightweight)")
 
         for file_path in tqdm(self.file_paths, desc="Loading recordings", unit="file"):
             cache_path = get_cache_path(file_path, self.preprocessed_dir, self.config)
@@ -506,106 +609,126 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
                     save_preprocessed_recording(
                         cache_path, meg_data, spike_samples, metadata, channel_info
                     )
+                    n_samples = meg_data.shape[1]
+                    del meg_data  # Free immediately
                 except Exception as e:
                     self.logger.error(f"Error preprocessing {file_path}: {e}")
                     continue
             else:
                 try:
-                    meg_data, spike_samples, metadata, channel_info = load_preprocessed_recording(cache_path)
+                    spike_samples, metadata, channel_info, n_samples = load_recording_lightweight(cache_path)
                 except Exception as e:
                     self.logger.error(f"Error loading cached file {cache_path}: {e}")
                     continue
 
-            # Refine spike positions with GFP peak alignment (once, at load time)
-            if self.config.get('refine_spike_positions', False) and len(spike_samples) > 0:
-                n_samples_total = meg_data.shape[1]
-                new_spike_samples = []
-                for spike_sample in spike_samples:
-                    peak_sample, _ = find_gfp_peak_in_window(
-                        meg_data,
-                        max(0, spike_sample - int(self.config['first_half_spike_duration'] * self.config['sampling_rate'])),
-                        min(n_samples_total, spike_sample + int(self.config['second_half_spike_duration'] * self.config['sampling_rate'])),
-                        self.config['sampling_rate']
-                    )
-                    new_spike_samples.append(peak_sample)
-                spike_samples = sorted(set(new_spike_samples))
+            self.cache.add_recording(cache_path, spike_samples, metadata, channel_info, n_samples)
 
-            self.recordings.append((meg_data, spike_samples, metadata, channel_info))
+        self.logger.info(f"Loaded {len(self.cache)} recordings (lightweight, no meg_data in memory)")
 
-        self.logger.info(f"Loaded {len(self.recordings)} recordings into memory")
+    def _ensure_spikes_refined(self, rec_idx: int) -> None:
+        """Lazily refine spike positions with GFP peak alignment on first access."""
+        if not self.config.get('refine_spike_positions', False):
+            return
+        if rec_idx in self._spikes_refined:
+            return
+
+        spike_samples = self.cache.spike_samples_list[rec_idx]
+        if len(spike_samples) == 0:
+            self._spikes_refined.add(rec_idx)
+            return
+
+        meg_data = self.cache.get_meg_data(rec_idx)
+        n_samples_total = meg_data.shape[1]
+        new_spike_samples = []
+        for spike_sample in spike_samples:
+            peak_sample, _ = find_gfp_peak_in_window(
+                meg_data,
+                max(0, spike_sample - int(self.config['first_half_spike_duration'] * self.config['sampling_rate'])),
+                min(n_samples_total, spike_sample + int(self.config['second_half_spike_duration'] * self.config['sampling_rate'])),
+                self.config['sampling_rate']
+            )
+            new_spike_samples.append(peak_sample)
+
+        self.cache.spike_samples_list[rec_idx] = np.array(
+            sorted(set(new_spike_samples)), dtype=np.int64
+        )
+        self._spikes_refined.add(rec_idx)
 
     def _build_index_map(self):
         """Build index mapping from global index to (recording_idx, local_chunk_idx).
 
         Training mode uses samples_per_recording with random sampling.
         Test/validation mode uses all possible chunks for exhaustive coverage.
+        Window counts are computed arithmetically from n_samples — no meg_data needed.
         """
         if self.is_test:
-            from .preprocessing.segmentation import create_windows
-
             self.chunks_per_recording = []
             num_context_windows = self.config['n_windows']
+            window_duration_samples = int(self.config['window_duration_s'] * self.config['sampling_rate'])
+            window_overlap = self.config.get('window_overlap', 0.0)
+            window_step = max(1, int(window_duration_samples * (1 - window_overlap)))
 
-            for meg_data, _, _, _ in self.recordings:
-                all_windows = create_windows(
-                    meg_data,
-                    self.config['sampling_rate'],
-                    self.config['window_duration_s'],
-                    self.config.get('window_overlap', 0.0),
-                )
-                self.all_windows_per_recording.append(all_windows)
-
-                total_windows = len(all_windows)
-                n_chunks = (total_windows + num_context_windows - 1) // num_context_windows
+            total_windows_all = 0
+            for i in range(len(self.cache)):
+                n_samples = self.cache.n_samples_list[i]
+                # Arithmetic window count matching create_windows() logic
+                total_windows = max(0, (n_samples - window_duration_samples) // window_step + 1)
+                n_chunks = (total_windows + num_context_windows - 1) // num_context_windows if total_windows > 0 else 0
                 self.chunks_per_recording.append(n_chunks)
+                total_windows_all += total_windows
 
             self.cumulative_chunks = np.cumsum([0] + self.chunks_per_recording)
 
             total_chunks = sum(self.chunks_per_recording)
-            total_windows = sum(len(w) for w in self.all_windows_per_recording)
-            self.logger.info(f"Test dataset size: {total_chunks} chunks ({total_windows} windows) "
-                           f"from {len(self.recordings)} recordings (exhaustive sequential extraction)")
+            self.logger.info(f"Test dataset size: {total_chunks} chunks ({total_windows_all} windows) "
+                           f"from {len(self.cache)} recordings (exhaustive sequential extraction)")
         else:
             spike_aware = self.config.get('spike_aware_training', False)
 
             # Resolve per-recording chunk count for "auto" mode
             if self.samples_per_recording == "auto":
                 chunk_dur = calculate_chunk_duration(self.config)
-                def _auto_chunks(meg_data):
-                    return math.ceil(meg_data.shape[1] / chunk_dur)
+                def _auto_chunks(n_samples):
+                    return math.ceil(n_samples / chunk_dur)
             else:
-                def _auto_chunks(meg_data):
+                def _auto_chunks(n_samples):
                     return self.samples_per_recording
 
             if spike_aware:
                 # Spike subjects: one chunk per spike. Controls: samples_per_recording random chunks.
                 n_spike_recs = 0
                 n_control_recs = 0
-                for meg_data, spike_samples, metadata, channel_info in self.recordings:
+                for i in range(len(self.cache)):
+                    spike_samples = self.cache.spike_samples_list[i]
                     n_spikes = len(spike_samples)
                     if n_spikes > 0:
                         self.chunks_per_recording.append(n_spikes)
                         n_spike_recs += 1
                     else:
-                        self.chunks_per_recording.append(_auto_chunks(meg_data))
+                        self.chunks_per_recording.append(_auto_chunks(self.cache.n_samples_list[i]))
                         n_control_recs += 1
                 n_control_chunks = sum(
-                    c for c, (_, sp, _, _) in zip(self.chunks_per_recording, self.recordings) if len(sp) == 0
+                    c for i, c in enumerate(self.chunks_per_recording)
+                    if len(self.cache.spike_samples_list[i]) == 0
+                )
+                n_spike_chunks = sum(
+                    c for i, c in enumerate(self.chunks_per_recording)
+                    if len(self.cache.spike_samples_list[i]) > 0
                 )
                 self.logger.info(
                     f"Spike-aware training: {n_spike_recs} spike recordings "
-                    f"({sum(c for c, (_, sp, _, _) in zip(self.chunks_per_recording, self.recordings) if len(sp) > 0)} spike chunks), "
+                    f"({n_spike_chunks} spike chunks), "
                     f"{n_control_recs} control recordings "
                     f"({n_control_chunks} random chunks)"
                 )
             else:
                 self.chunks_per_recording = [
-                    _auto_chunks(meg_data) for meg_data, _, _, _ in self.recordings
+                    _auto_chunks(self.cache.n_samples_list[i]) for i in range(len(self.cache))
                 ]
 
             self.cumulative_chunks = np.cumsum([0] + self.chunks_per_recording)
 
-            self.logger.info(f"Train dataset size: {len(self)} chunks from {len(self.recordings)} recordings")
+            self.logger.info(f"Train dataset size: {len(self)} chunks from {len(self.cache)} recordings")
 
     def __len__(self) -> int:
         """Return total number of chunks."""
@@ -625,12 +748,23 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
         rec_idx = int(np.searchsorted(self.cumulative_chunks, idx, side='right') - 1)
         local_chunk_idx = idx - self.cumulative_chunks[rec_idx]
 
-        meg_data, spike_samples, metadata, channel_info = self.recordings[rec_idx]
+        # Lazy spike refinement (idempotent, runs once per recording)
+        self._ensure_spikes_refined(rec_idx)
+
+        spike_samples = self.cache.spike_samples_list[rec_idx]
+        metadata = self.cache.metadata_list[rec_idx]
+        channel_info = self.cache.channel_info_list[rec_idx]
+        meg_data = self.cache.get_meg_data(rec_idx)
 
         if self.is_test:
-            from .preprocessing.segmentation import calculate_window_labels_from_spikes
+            from .preprocessing.segmentation import create_windows, calculate_window_labels_from_spikes
 
-            all_windows = self.all_windows_per_recording[rec_idx]
+            all_windows = create_windows(
+                meg_data,
+                self.config['sampling_rate'],
+                self.config['window_duration_s'],
+                self.config.get('window_overlap', 0.0),
+            )
             num_context_windows = self.config['n_windows']
 
             # Calculate window indices for this chunk

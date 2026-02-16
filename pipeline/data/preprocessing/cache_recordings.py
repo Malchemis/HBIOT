@@ -266,6 +266,43 @@ def load_preprocessed_recording(
     return meg_data, spike_samples, metadata, channel_info # type: ignore
 
 
+def load_recording_lightweight(
+    cache_path: Path
+) -> Tuple[np.ndarray, Dict[str, Any], Dict[str, Any], int]:
+    """Load recording metadata from HDF5 without loading meg_data.
+
+    Reads spike_samples, metadata, channel_info, and the shape of meg_data
+    (to get n_samples) without actually loading the large meg_data array.
+
+    Args:
+        cache_path: Path to cached HDF5 file.
+
+    Returns:
+        Tuple of (spike_samples, metadata, channel_info, n_samples).
+    """
+    with h5py.File(cache_path, 'r', swmr=True) as f:
+        spike_samples = f['spike_samples'][:]                        # type: ignore
+        metadata = json.loads(f['metadata'][()])                     # type: ignore
+        channel_info = json.loads(f['channel_info'][()])             # type: ignore
+        n_samples = f['meg_data'].shape[1]                           # type: ignore
+
+    return spike_samples, metadata, channel_info, n_samples          # type: ignore
+
+
+def load_meg_data(cache_path: Path) -> np.ndarray:
+    """Load only meg_data from an HDF5 cache file.
+
+    Args:
+        cache_path: Path to cached HDF5 file.
+
+    Returns:
+        MEG data array (n_channels, n_samples).
+    """
+    with h5py.File(cache_path, 'r', swmr=True) as f:
+        meg_data = f['meg_data'][:]  # type: ignore
+    return meg_data                  # type: ignore
+
+
 def _preprocess_and_cache_single_file(
     file_path: str,
     config: Dict[str, Any],
