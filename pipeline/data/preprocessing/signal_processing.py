@@ -111,7 +111,7 @@ def load_and_process_meg_data(
                 raw = detect_bad_channels_auto(raw, method=method, threshold=threshold, copy=False, verbose=True)
             if raw.info['bads']:
                 logger.info(f"Auto-detected {len(raw.info['bads'])} bad channels, excluding them")
-                raw.pick(exclude='bads')
+                raw.pick(picks=['meg'], exclude='bads')
 
         # Special case handling for specific file patterns
         for pattern, channels in config.get('special_case_handling', {}).items():

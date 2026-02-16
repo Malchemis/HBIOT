@@ -52,25 +52,63 @@ annotation_rules:
     include: []
     exclude: ["true_spike", "detected_spike", "bad_1"]
 
-# Per-spike quality filtering
-# ------------------------------------------
-# Reject individual spikes that do not show activity in enough channels.
-# Requires loading MEG data and computing peak-to-peak amplitude z-scores.
-spike_quality_filtering:
-  enabled: true
-  threshold_zscore: 2.5           # Z-score threshold for active channel detection
-  min_active_channels: 5          # Minimum channels with activity to keep a spike
-  epoch_half_duration_s: 0.05     # Half-window around spike peak for PTP calculation
+# ----------------------------------------------------------------------
+# Windowing Parameters
+# ----------------------------------------------------------------------
+sampling_rate: 200                      # Target sampling frequency (Hz)
+window_duration_s: 0.2                  # Duration of each window (seconds)
+                                        # At 200Hz: 40 samples per window
+n_windows: 20                           # Number of windows per chunk/sequence
+window_overlap: 0.5                     # Overlap between consecutive windows
+                                        # 0.0 = no overlap, 1.0 = complete overlap
+                                        # 0.5 = 50% overlap (recommended)
 
-# Signal processing applied before spike quality filtering
-# ------------------------------------------
-# Must match the main config (default_config.yaml) to ensure consistent
-# spike quality filtering between split generation and HDF5 caching.
-preprocessing:
-  sampling_rate: 200              # Target sampling rate (Hz)
-  l_freq: 1.0                    # High-pass filter cutoff (Hz)
-  h_freq: 99.0                   # Low-pass filter cutoff (Hz)
-  notch_freq: 50.0               # Notch filter for line noise (Hz)
+
+# ----------------------------------------------------------------------
+# Spike Labeling Parameters
+# ----------------------------------------------------------------------
+refine_spike_positions: true # Refine spike positions using peak detection of Global Field Power (GFP)
+spike_overlap_threshold: 0.0            # Minimum overlap to label window as positive
+                                        # 0.0 = any overlap counts
+                                        # 0.9 = 90% of spike must be in window
+estimated_spike_duration_s: 0.1         # Expected total spike duration (seconds)
+first_half_spike_duration: 0.05         # Duration before spike peak
+second_half_spike_duration: 0.05        # Duration after spike peak
+predict_event_onset: true               # Predict spike onset in addition to presence
+
+# ----------------------------------------------------------------------
+# Spike-Aware Training
+# ----------------------------------------------------------------------
+# When enabled, spike subjects produce one chunk per spike (centered on it).
+# Control subjects (0 spikes) keep random extraction as usual.
+spike_aware_training: true              # Enable spike-centered chunk extraction
+
+# Per-spike quality filtering at preprocessing time (HDF5 cache)
+spike_quality_filtering:
+  enabled: true                         # Filter spikes by multi-channel activity
+  threshold_zscore: 1.5                 # Z-score threshold for active channels
+  min_active_channels: 3                # Minimum active channels to keep a spike
+  epoch_half_duration_s: 0.05           # Half-window around spike for PTP calc
+  protect_groups:                       # Groups never filtered (e.g., test/holdout)
+    - "Holdout"
+
+# ----------------------------------------------------------------------
+# Signal Processing Pipeline
+# ----------------------------------------------------------------------
+# Applied in this order:
+# 1. Load raw data → 2. Auto bad channel detection (optional) →
+# 3. Bandpass filter → 4. Notch filter →
+# 5. Normalize → 6. Median filter (optional)
+
+# Automatic bad channel detection (variance / flatness / correlation)
+auto_bad_channel_detection:
+  enabled: true                         # Enable automatic bad channel detection
+  threshold: 3.0                        # Z-score threshold for marking channels as bad
+
+l_freq: 1.0                             # High-pass filter cutoff (Hz)
+h_freq: 99.0                            # Low-pass filter cutoff (Hz)
+notch_freq: 50.0                        # Notch filter for line noise (Hz, 50 or 60)
+                                        # Set to 0 to disable notch filter
 
 # Subject-level filtering
 # ------------------------------------------
@@ -78,7 +116,7 @@ preprocessing:
 # Subjects with 0 spikes (controls) are always kept.
 subject_filtering:
   enabled: true
-  min_spikes_per_minute: 0.5      # Subjects with 0 < rate < this are removed
+  min_spikes_per_minute: 1         # Subjects with 0 < rate < this are removed
   protect_groups:                  # Groups never filtered (e.g., test/holdout)
     - "Holdout"
 
