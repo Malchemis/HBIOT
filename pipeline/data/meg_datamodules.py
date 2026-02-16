@@ -50,7 +50,7 @@ class MEGOnTheFlyDataModule(L.LightningDataModule):
         reference_coordinates: str = "",
         dataset_name: str = "PreloadedDataset",
         preprocessed_dir: Optional[str] = None,
-        samples_per_recording: int = 10,
+        samples_per_recording: Union[int, str] = "auto",
         force_preprocess: bool = False,
         **kwargs: Any
     ):

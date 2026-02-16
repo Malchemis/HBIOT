@@ -44,6 +44,7 @@ Datasets:
 """
 import json
 import logging
+import math
 import random
 import traceback
 from functools import partial
@@ -61,6 +62,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 from pipeline.data.preprocessing.file_manager import get_patient_group
 from pipeline.data.preprocessing.segmentation import (
+    calculate_chunk_duration,
     create_chunks,
     extract_random_chunk,
     extract_spike_centered_chunk,
@@ -449,7 +451,7 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
         config: Dict[str, Any],
         good_channels: List[str],
         preprocessed_dir: str,
-        samples_per_recording: int = 45,
+        samples_per_recording: Union[int, str] = "auto",
         is_test: bool = False,
         force_preprocess: bool = False,
     ):
@@ -566,6 +568,15 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
         else:
             spike_aware = self.config.get('spike_aware_training', False)
 
+            # Resolve per-recording chunk count for "auto" mode
+            if self.samples_per_recording == "auto":
+                chunk_dur = calculate_chunk_duration(self.config)
+                def _auto_chunks(meg_data):
+                    return math.ceil(meg_data.shape[1] / chunk_dur)
+            else:
+                def _auto_chunks(meg_data):
+                    return self.samples_per_recording
+
             if spike_aware:
                 # Spike subjects: one chunk per spike. Controls: samples_per_recording random chunks.
                 n_spike_recs = 0
@@ -576,16 +587,21 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
                         self.chunks_per_recording.append(n_spikes)
                         n_spike_recs += 1
                     else:
-                        self.chunks_per_recording.append(self.samples_per_recording)
+                        self.chunks_per_recording.append(_auto_chunks(meg_data))
                         n_control_recs += 1
+                n_control_chunks = sum(
+                    c for c, (_, sp, _, _) in zip(self.chunks_per_recording, self.recordings) if len(sp) == 0
+                )
                 self.logger.info(
                     f"Spike-aware training: {n_spike_recs} spike recordings "
                     f"({sum(c for c, (_, sp, _, _) in zip(self.chunks_per_recording, self.recordings) if len(sp) > 0)} spike chunks), "
                     f"{n_control_recs} control recordings "
-                    f"({n_control_recs * self.samples_per_recording} random chunks)"
+                    f"({n_control_chunks} random chunks)"
                 )
             else:
-                self.chunks_per_recording = [self.samples_per_recording for _ in self.recordings]
+                self.chunks_per_recording = [
+                    _auto_chunks(meg_data) for meg_data, _, _, _ in self.recordings
+                ]
 
             self.cumulative_chunks = np.cumsum([0] + self.chunks_per_recording)
 
@@ -715,7 +731,7 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
         config: Dict[str, Any],
         good_channels: List[str],
         preprocessed_dir: str,
-        samples_per_recording: int = 10,
+        samples_per_recording: Union[int, str] = "auto",
         force_preprocess: bool = False,
     ) -> 'OnlineWindowDataset':
         """Create dataset from test file JSON.
@@ -725,7 +741,7 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
             config: Dataset configuration
             good_channels: Ordered list of reference channel names
             preprocessed_dir: Directory for cached files
-            samples_per_recording: Chunks per recording
+            samples_per_recording: Chunks per recording ("auto" or int)
             force_preprocess: Force reprocessing
 
         Returns:
@@ -752,7 +768,7 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
         good_channels: List[str],
         preprocessed_dir: str,
         split_type: str = "train",
-        samples_per_recording: int = 10,
+        samples_per_recording: Union[int, str] = "auto",
         force_preprocess: bool = False,
     ) -> 'OnlineWindowDataset':
         """Create dataset from fold split file JSON.
@@ -763,7 +779,7 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
             good_channels: Ordered list of reference channel names
             preprocessed_dir: Directory for cached files
             split_type: 'train' or 'val'
-            samples_per_recording: Chunks per recording
+            samples_per_recording: Chunks per recording ("auto" or int)
             force_preprocess: Force reprocessing
 
         Returns:

@@ -209,9 +209,9 @@ data:
     # Only used when dataset_name: "OnlineWindowDataset"
     # Ignored when using PreloadedDataset
     preprocessed_dir: "${data_dir}/preprocessed_recordings"  # Directory for cached HDF5 files
-    samples_per_recording: 90                 # How many random chunks per recording per epoch
-                                              # Higher = more diversity but longer epoch
-                                              # Recommended: 90 for 3 minutes (approximate to sequential max full chunks in one recording)
+    samples_per_recording: "auto"             # How many random chunks per recording per epoch
+                                              # "auto" = ceil(recording_length / chunk_duration), adapts per recording
+                                              # Set to an integer for a fixed count across all recordings
     force_preprocess: false                   # Force reprocessing even if cache exists
                                               # Set true if you changed preprocessing params
 
