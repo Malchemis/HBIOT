@@ -868,7 +868,6 @@ class OnlineWindowDataset(torch.utils.data.Dataset):
             'local_chunk_idx': local_chunk_idx,    # Index of chunk within this recording
             'global_chunk_idx': idx,               # Global index across entire dataset
             'is_test_set': self.is_test,
-            'extraction_mode': 'sequential' if self.is_test else 'random',
         }
 
         return (
