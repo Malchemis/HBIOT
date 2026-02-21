@@ -19,6 +19,7 @@ dependencies = [
     "rich>=14.3.2",
     "scikit-learn>=1.8.0",
     "scipy>=1.17.0",
+    "statsmodels>=0.14.6",
     "tensorboard>=2.20.0",
     "torch>=2.10.0",
     "torchinfo>=1.8.0",
